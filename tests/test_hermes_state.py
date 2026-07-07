@@ -66,6 +66,37 @@ class _NoTrigramConnection(sqlite3.Connection):
         return super().cursor(factory or _NoTrigramCursor)
 
 
+class _LastrowidFailureCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    @property
+    def lastrowid(self):
+        raise sqlite3.DatabaseError("no more rows available")
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _LastrowidFailureConnection:
+    def __init__(self, conn):
+        self._conn = conn
+        self.failures = 0
+
+    def execute(self, sql, parameters=()):
+        cursor = self._conn.execute(sql, parameters)
+        if (
+            self.failures == 0
+            and sql.lstrip().upper().startswith("INSERT INTO MESSAGES ")
+        ):
+            self.failures += 1
+            return _LastrowidFailureCursor(cursor)
+        return cursor
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 @pytest.fixture()
 def db(tmp_path):
     """Create a SessionDB with a temp database file."""
@@ -787,6 +818,26 @@ class TestMessageStorage:
 
         session = db.get_session("s1")
         assert session["message_count"] == 2
+
+    def test_append_message_falls_back_when_lastrowid_cursor_is_done(self, db):
+        """A successful INSERT can rarely leave sqlite3's cursor wrapper in a
+        SQLITE_DONE state where ``lastrowid`` raises "no more rows available".
+        The message must still persist using SQLite's connection rowid value.
+        """
+        db.create_session(session_id="s1", source="cli")
+        db._conn = _LastrowidFailureConnection(db._conn)
+
+        msg_id = db.append_message(
+            "s1", role="tool", content="large output", tool_name="kanban_show"
+        )
+
+        assert msg_id > 0
+        assert db._conn.failures == 1
+        messages = db.get_messages("s1")
+        assert [m["content"] for m in messages] == ["large output"]
+        session = db.get_session("s1")
+        assert session["message_count"] == 1
+        assert session["tool_call_count"] == 0
 
     def test_observed_flag_round_trips_for_gateway_replay(self, db):
         db.create_session(session_id="s1", source="telegram:-100")

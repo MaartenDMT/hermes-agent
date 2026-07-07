@@ -3494,7 +3494,15 @@ class SessionDB:
                     1,
                 ),
             )
-            msg_id = cursor.lastrowid
+            try:
+                msg_id = cursor.lastrowid
+            except sqlite3.DatabaseError as exc:
+                if "no more rows available" not in str(exc).lower():
+                    raise
+                # Rare sqlite3 cursor-state failure seen after successful
+                # INSERTs with FTS triggers. Stay in the same transaction and
+                # ask SQLite for the connection's last rowid directly.
+                msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
             # Update counters
             if num_tool_calls > 0:

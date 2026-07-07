@@ -19,6 +19,7 @@ Both are configured through a single backend selection. Providers are chosen via
 | Provider | Env Var | Search | Extract | Free tier |
 |----------|---------|--------|---------|-----------|
 | **Firecrawl** (default) | `FIRECRAWL_API_KEY` | ✔ | ✔ | 500 credits/mo |
+| **Local-first extract** | - (no key) | - | ✔ | ✔ Free |
 | **SearXNG** | `SEARXNG_URL` | ✔ | — | ✔ Free (self-hosted) |
 | **Brave Search (free tier)** | `BRAVE_SEARCH_API_KEY` | ✔ | — | 2 000 queries/mo |
 | **DDGS (DuckDuckGo)** | — (no key) | ✔ | — | ✔ Free |
@@ -27,7 +28,10 @@ Both are configured through a single backend selection. Providers are chosen via
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | Paid |
 | **xAI (Grok)** | `XAI_API_KEY` or `hermes auth login xai-oauth` | ✔ | — | Paid (SuperGrok or per-token) |
 
-Brave Search, DDGS, and xAI are **search-only** — pair any of them with Firecrawl/Tavily/Exa/Parallel when you also need `web_extract`. DDGS uses the [`ddgs` Python package](https://pypi.org/project/ddgs/) under the hood; if it isn't already installed, run `pip install ddgs` (or let Hermes lazy-install it on first use). xAI runs Grok's server-side `web_search` tool on the Responses API — results are LLM-generated rather than index-backed, so titles, descriptions, and URL choice are all model output (see the [trust-model caveat](#xai-grok) below).
+Brave Search, DDGS, and xAI are **search-only**.
+Pair any of them with `local_first` for free local extraction, or with Firecrawl/Tavily/Exa/Parallel when you explicitly want a hosted extractor.
+DDGS uses the [`ddgs` Python package](https://pypi.org/project/ddgs/) under the hood; if it isn't already installed, run `pip install ddgs` (or let Hermes lazy-install it on first use).
+xAI runs Grok's server-side `web_search` tool on the Responses API — results are LLM-generated rather than index-backed, so titles, descriptions, and URL choice are all model output (see the [trust-model caveat](#xai-grok) below).
 
 **Per-capability split:** you can use different providers for search and extract independently — for example SearXNG (free) for search and Firecrawl for extract. See [Per-capability configuration](#per-capability-configuration) below.
 
@@ -244,10 +248,57 @@ SearXNG handles search; you need a separate provider for `web_extract`. Use the 
 # ~/.hermes/config.yaml
 web:
   search_backend: "searxng"
-  extract_backend: "firecrawl"   # or tavily, exa, parallel
+  extract_backend: "local_first"   # or firecrawl, tavily, exa, parallel
 ```
 
-With this config, Hermes uses SearXNG for all search queries and Firecrawl for URL extraction — combining free search with high-quality extraction.
+With this config, Hermes uses SearXNG for all search queries and local-first extraction for URL content.
+Use a hosted extract backend only when you have explicitly configured credentials and budget for it.
+
+---
+
+### Local-first extract
+
+`local_first` is the free extract backend for agents and worker profiles.
+It is extract-only, so pair it with a search backend such as DDGS or SearXNG:
+
+```yaml
+# ~/.hermes/config.yaml
+web:
+  search_backend: "ddgs"
+  extract_backend: "local_first"
+  local_extract:
+    timeout_seconds: 30
+    max_output_chars: 1000000
+    failure_cache_ttl_seconds: 300
+```
+
+Provider order is safe and cheap by default:
+
+- Plain HTTP/readability runs first for static pages and raw docs.
+- Crawl4AI runs next when the `crawl4ai` Python package is installed.
+- Scrapling runs last when the `scrapling` Python package is installed.
+- Hosted extractors are not used by `local_first`.
+
+Missing Crawl4AI or Scrapling installations are negative-cached briefly, so repeated worker runs do not spam import and subprocess attempts.
+Diagnostics are returned in the per-URL error if every local path fails.
+
+Optional local crawler setup:
+
+```bash
+pip install crawl4ai
+python -m crawl4ai.setup
+
+pip install "scrapling[fetchers]"
+python -m scrapling install
+```
+
+If you want a hosted extractor instead, configure it directly and track the spend outside the local-first backend:
+
+```yaml
+web:
+  search_backend: "ddgs"
+  extract_backend: "firecrawl"  # or tavily, exa, parallel
+```
 
 ---
 
@@ -346,7 +397,7 @@ Set one provider for all web capabilities:
 ```yaml
 # ~/.hermes/config.yaml
 web:
-  backend: "searxng"   # firecrawl | searxng | brave-free | ddgs | tavily | exa | parallel | xai
+  backend: "searxng"   # firecrawl | local_first | local | searxng | brave-free | ddgs | tavily | exa | parallel | xai
 ```
 
 ### Per-capability configuration
@@ -357,10 +408,12 @@ Use different providers for search vs extract. This lets you combine free search
 # ~/.hermes/config.yaml
 web:
   search_backend: "searxng"     # used by web_search
-  extract_backend: "firecrawl"  # used by web_extract
+  extract_backend: "local_first" # used by web_extract
 ```
 
-When per-capability keys are empty, both fall through to `web.backend`. When `web.backend` is also empty, the backend is auto-detected from whichever API key/URL is present.
+When per-capability keys are empty, both fall through to `web.backend`.
+If `web.backend` is search-only, `web_extract` falls through to an extract-capable provider such as `local_first`.
+When `web.backend` is also empty, the backend is auto-detected from whichever API key/URL is present.
 
 **Priority order (per capability):**
 1. `web.search_backend` / `web.extract_backend` (explicit per-capability)
@@ -373,11 +426,12 @@ If no backend is explicitly configured, Hermes picks the first available one bas
 
 | Credential present | Auto-selected backend |
 |--------------------|-----------------------|
-| `FIRECRAWL_API_KEY` or `FIRECRAWL_API_URL` | firecrawl |
-| `PARALLEL_API_KEY` | parallel |
 | `TAVILY_API_KEY` | tavily |
 | `EXA_API_KEY` | exa |
+| `PARALLEL_API_KEY` | parallel |
+| `FIRECRAWL_API_KEY` or `FIRECRAWL_API_URL` | firecrawl |
 | `SEARXNG_URL` | searxng |
+| `ddgs` package installed | ddgs for search, local_first for extract |
 
 xAI Web Search is **not** in the auto-detection chain — having `XAI_API_KEY` set (or being signed in via xAI Grok OAuth) does not automatically route web traffic through xAI, since those credentials are also used for inference / TTS / image gen and the user may want a different backend for web. Opt in explicitly with `web.backend: "xai"`.
 
@@ -418,12 +472,13 @@ This prints the active backend and its status:
 
 ### `web_extract` says "search-only backend"
 
-SearXNG cannot extract URL content. Set `web.extract_backend` to a provider that supports extraction:
+SearXNG, Brave Search, DDGS, and xAI cannot extract URL content.
+Set `web.extract_backend` to a provider that supports extraction:
 
 ```yaml
 web:
   search_backend: "searxng"
-  extract_backend: "firecrawl"  # or tavily / exa / parallel
+  extract_backend: "local_first"  # or firecrawl / tavily / exa / parallel
 ```
 
 ### SearXNG returns 0 results

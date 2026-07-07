@@ -857,6 +857,21 @@ platform_toolsets:
 #   history_backfill: true           # Recover missed channel messages on mention (default: true)
 #   history_backfill_limit: 50       # Max messages to scan backwards (default: 50)
 
+# Web search and extraction.
+# Search and extract can use different backends. This is useful when search is
+# free/search-only (ddgs, searxng, brave-free, xai) and extraction should stay
+# local-first instead of falling through to a hosted scraper.
+#
+# web:
+#   backend: "ddgs"                 # shared fallback for web_search
+#   search_backend: "ddgs"          # optional explicit web_search backend
+#   extract_backend: "local_first"  # local_first/local for free local extraction
+#   extract_char_limit: 15000
+#   local_extract:
+#     timeout_seconds: 30           # hard bound for each HTTP/crawler attempt
+#     max_output_chars: 1000000     # cap subprocess/provider output
+#     failure_cache_ttl_seconds: 300 # negative-cache missing/failed local crawlers
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Available toolsets (use these names in platform_toolsets or the toolsets list)
 #

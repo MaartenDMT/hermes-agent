@@ -1190,8 +1190,17 @@ DEFAULT_CONFIG = {
     "web": {
         "backend": "",           # shared fallback — applies to both search and extract
         "search_backend": "",    # per-capability override for web_search (e.g. "searxng")
-        "extract_backend": "",   # per-capability override for web_extract (e.g. "native")
+        "extract_backend": "",   # per-capability override for web_extract (e.g. "local_first")
         "extract_char_limit": 15000,  # per-page char budget for web_extract; larger pages truncate + store full text in cache/web
+        "local_extract": {
+            # Bounded local-first extraction used by web.extract_backend=local_first.
+            # Plain HTTP/readability runs first, then optional local Crawl4AI
+            # and Scrapling subprocesses when installed. Hosted providers are
+            # not used by this backend.
+            "timeout_seconds": 30,
+            "max_output_chars": 1000000,
+            "failure_cache_ttl_seconds": 300,
+        },
     },
 
     "browser": {

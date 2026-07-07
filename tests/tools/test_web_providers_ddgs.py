@@ -281,11 +281,15 @@ class TestDDGSSearchOnlyErrors:
         from agent.web_search_registry import _reset_for_tests
         _reset_for_tests()
 
-    def test_web_extract_returns_search_only_error(self, monkeypatch):
+    def test_web_extract_returns_search_only_error_when_explicit_extract_backend(self, monkeypatch):
         import asyncio
         from tools import web_tools
 
-        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "ddgs"})
+        monkeypatch.setattr(
+            web_tools,
+            "_load_web_config",
+            lambda: {"backend": "ddgs", "extract_backend": "ddgs"},
+        )
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
         monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
         async def _allow_ssrf(_url: str) -> bool:

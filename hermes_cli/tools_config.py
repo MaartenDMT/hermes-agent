@@ -2241,9 +2241,8 @@ def _plugin_video_gen_providers() -> list[dict]:
 
 # Mirror of _plugin_image_gen_providers for web search backends. Surfaces
 # every plugin-registered web provider so it appears in the
-# "Web Search & Extract" picker. All seven providers (brave-free, ddgs,
-# searxng, exa, parallel, tavily, firecrawl) live as plugins after
-# PR #25182 — this helper is the sole source of truth for the category's
+# "Web Search & Extract" picker. Bundled web providers live as plugins after
+# PR #25182, and this helper is the sole source of truth for the category's
 # provider rows. The hardcoded entries that used to drive the category
 # were deleted in the same PR; only the two non-provider UX rows
 # ("Nous Subscription" managed-gateway entry, "Firecrawl Self-Hosted")
@@ -2258,9 +2257,8 @@ def _plugin_web_search_providers() -> list[dict]:
     marker) so the picker behaves identically whether a provider is
     hardcoded or plugin-registered.
 
-    After PR #25182, all seven web providers (brave-free, ddgs, searxng,
-    exa, parallel, tavily, firecrawl) are plugins; this helper is the sole
-    source of provider rows for the Web Search & Extract category.
+    Bundled web providers are plugins; this helper is the sole source of
+    provider rows for the Web Search & Extract category.
     """
     try:
         from agent.web_search_registry import list_providers as _list_web_providers

@@ -1,0 +1,8 @@
+name: web-local-first
+version: 1.0.0
+description: "Free local-first web extraction. Uses bounded plain HTTP/readability first, then optional local Crawl4AI and Scrapling subprocesses. No hosted extractor is used."
+author: NousResearch
+kind: backend
+provides_web_providers:
+  - local_first
+  - local

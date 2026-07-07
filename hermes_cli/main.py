@@ -9755,6 +9755,20 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         "  If this is a fully managed install, review the branch "
                         "and discard local commits manually."
                     )
+                    if current_branch not in {branch, "HEAD"}:
+                        restore_branch = subprocess.run(
+                            git_cmd + ["checkout", current_branch],
+                            cwd=PROJECT_ROOT,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if restore_branch.returncode == 0:
+                            print(f"  Restored branch '{current_branch}'.")
+                        else:
+                            print(
+                                f"  Could not restore branch '{current_branch}'; "
+                                "check `git status` before continuing."
+                            )
                     sys.exit(1)
 
                 # No local commits are ahead of the fetched remote tip. This

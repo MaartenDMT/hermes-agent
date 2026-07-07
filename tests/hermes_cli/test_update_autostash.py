@@ -598,6 +598,34 @@ def test_cmd_update_aborts_when_ff_only_fails_with_local_commits(
     assert "git cherry-pick <local-commit>..." in out
 
 
+def test_cmd_update_restores_original_branch_when_local_commit_abort(
+    monkeypatch, tmp_path, capsys
+):
+    """A failed update from a feature branch returns to the original branch."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    side_effect, recorded = _make_update_side_effect(
+        current_branch="fix/something",
+        ff_only_fails=True,
+        local_commit_count="2",
+    )
+    monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
+
+    with pytest.raises(SystemExit, match="1"):
+        hermes_main.cmd_update(SimpleNamespace())
+
+    checkout_main_calls = [c for c in recorded if c == ["git", "checkout", "main"]]
+    checkout_back_calls = [
+        c for c in recorded if c == ["git", "checkout", "fix/something"]
+    ]
+    assert len(checkout_main_calls) == 1
+    assert len(checkout_back_calls) == 1
+
+    out = capsys.readouterr().out
+    assert "Restored branch 'fix/something'." in out
+
+
 def test_cmd_update_keeps_reset_fallback_when_ff_only_fails_without_local_commits(
     monkeypatch, tmp_path, capsys
 ):

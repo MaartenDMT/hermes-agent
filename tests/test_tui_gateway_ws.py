@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 import time
 
@@ -162,3 +163,49 @@ def test_ws_write_loop_stall_does_not_latch_transport(monkeypatch):
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2)
         loop.close()
+
+
+def test_ws_expected_close_send_failure_is_not_warning(caplog):
+    class FakeWS:
+        async def send_text(self, line):
+            raise RuntimeError('Cannot call "send" once a close message has been sent.')
+
+    async def run():
+        transport = ws_mod.WSTransport(FakeWS(), asyncio.get_running_loop(), peer="closed-test")
+        assert await transport.write_async({"a": 1}) is False
+        assert transport._closed is True
+
+    with caplog.at_level(logging.WARNING, logger=ws_mod._log.name):
+        asyncio.run(run())
+
+    assert not [
+        record for record in caplog.records
+        if record.name == ws_mod._log.name and "ws send failed" in record.getMessage()
+    ]
+
+
+def test_ws_sends_are_serialized():
+    active = 0
+    max_active = 0
+    sent = []
+
+    class FakeWS:
+        async def send_text(self, line):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            sent.append(line)
+            active -= 1
+
+    async def run():
+        transport = ws_mod.WSTransport(FakeWS(), asyncio.get_running_loop(), peer="serial-test")
+        await asyncio.gather(
+            transport.write_async({"a": 1}),
+            transport.write_async({"b": 2}),
+        )
+
+    asyncio.run(run())
+
+    assert len(sent) == 2
+    assert max_active == 1

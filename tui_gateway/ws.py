@@ -29,6 +29,7 @@ import json
 import logging
 import socket
 import threading
+import time
 from typing import Any
 
 from tui_gateway import server
@@ -40,6 +41,7 @@ _log = logging.getLogger(__name__)
 # threads from a wedged socket.
 _WS_WRITE_TIMEOUT_S = 10.0
 _WS_LOG_PAYLOAD_PREVIEW = 240
+_WS_SLOW_WRITE_LOG_INTERVAL_S = 30.0
 
 # Per-token streaming frames are coalesced: buffered and flushed as a batch on
 # a short timer instead of waking the event loop once per token. A model reply
@@ -94,6 +96,9 @@ class WSTransport:
         self._loop = loop
         self._peer = peer
         self._closed = False
+        self._send_lock = asyncio.Lock()
+        self._pending_send_tasks: set[asyncio.Task[None]] = set()
+        self._last_slow_write_log_at = 0.0
         # Token-coalescing buffer (CF-2). Streamed token frames land here and a
         # short timer flushes the batch. The lock guards the buffer + the
         # "armed" flag against the worker threads that call write(); the timer
@@ -149,7 +154,7 @@ class WSTransport:
             self._pending_tokens = []
             if on_loop:
                 # Fire-and-forget — don't block the loop waiting on itself.
-                self._loop.create_task(self._safe_send_many(batch))
+                self._track_send_task(self._loop.create_task(self._safe_send_many(batch)))
                 return True
             fut = safe_schedule_threadsafe(
                 self._safe_send_many(batch), self._loop
@@ -169,10 +174,7 @@ class WSTransport:
             # write (the "subagent window shows zero streaming" bug). Unblock
             # the worker thread and keep the transport alive; _safe_send_many
             # latches on a real socket error when the frame actually fails.
-            _log.warning(
-                "ws write slow (loop stalled >%ss) peer=%s — frame left in flight",
-                _WS_WRITE_TIMEOUT_S, self._peer,
-            )
+            self._log_slow_write()
             return not self._closed
         except Exception as exc:
             self._closed = True
@@ -204,7 +206,7 @@ class WSTransport:
                 return
             batch = self._pending_tokens
             self._pending_tokens = []
-            self._loop.create_task(self._safe_send_many(batch))
+            self._track_send_task(self._loop.create_task(self._safe_send_many(batch)))
 
     async def write_async(self, obj: dict) -> bool:
         """Send from the owning event loop. Awaits until the frame is on the wire."""
@@ -221,35 +223,74 @@ class WSTransport:
         return not self._closed
 
     async def _safe_send(self, line: str) -> None:
+        if self._closed:
+            return
         try:
-            await self._ws.send_text(line)
-        except Exception as exc:
-            self._closed = True
-            _log.warning(
-                "ws send failed peer=%s error_type=%s error=%s",
-                self._peer, type(exc).__name__, exc,
-            )
-
-    async def _safe_send_many(self, lines: list[str]) -> None:
-        """Send a batch of pre-serialized frames in order on the loop thread."""
-        try:
-            for line in lines:
+            async with self._send_lock:
+                if self._closed:
+                    return
                 await self._ws.send_text(line)
         except Exception as exc:
             self._closed = True
-            _log.warning(
-                "ws send failed peer=%s error_type=%s error=%s",
-                self._peer, type(exc).__name__, exc,
-            )
+            if _is_expected_ws_close(exc):
+                _log.debug(
+                    "ws send skipped after close peer=%s error_type=%s error=%s",
+                    self._peer, type(exc).__name__, exc,
+                )
+            else:
+                _log.warning(
+                    "ws send failed peer=%s error_type=%s error=%s",
+                    self._peer, type(exc).__name__, exc,
+                )
+
+    async def _safe_send_many(self, lines: list[str]) -> None:
+        """Send a batch of pre-serialized frames in order on the loop thread."""
+        if self._closed:
+            return
+        try:
+            async with self._send_lock:
+                if self._closed:
+                    return
+                for line in lines:
+                    await self._ws.send_text(line)
+        except Exception as exc:
+            self._closed = True
+            if _is_expected_ws_close(exc):
+                _log.debug(
+                    "ws send skipped after close peer=%s error_type=%s error=%s",
+                    self._peer, type(exc).__name__, exc,
+                )
+            else:
+                _log.warning(
+                    "ws send failed peer=%s error_type=%s error=%s",
+                    self._peer, type(exc).__name__, exc,
+                )
 
     def close(self) -> None:
         self._closed = True
+        for task in tuple(self._pending_send_tasks):
+            if not task.done():
+                task.cancel()
         # Cancel any pending coalesce flush. close() runs on the loop thread
         # (the handle_ws finally), so touching the TimerHandle here is safe.
         handle = self._token_flush_handle
         if handle is not None:
             handle.cancel()
             self._token_flush_handle = None
+
+    def _track_send_task(self, task: asyncio.Task[None]) -> None:
+        self._pending_send_tasks.add(task)
+        task.add_done_callback(self._pending_send_tasks.discard)
+
+    def _log_slow_write(self) -> None:
+        now = time.monotonic()
+        if now - self._last_slow_write_log_at < _WS_SLOW_WRITE_LOG_INTERVAL_S:
+            return
+        self._last_slow_write_log_at = now
+        _log.warning(
+            "ws write slow (loop stalled >%ss) peer=%s - frame left in flight",
+            _WS_WRITE_TIMEOUT_S, self._peer,
+        )
 
 
 def _ws_peer_label(ws: Any) -> str:
@@ -260,6 +301,19 @@ def _ws_peer_label(ws: Any) -> str:
     host = getattr(client, "host", None) or "unknown"
     port = getattr(client, "port", None)
     return f"{host}:{port}" if port is not None else host
+
+
+def _is_expected_ws_close(exc: Exception) -> bool:
+    if isinstance(exc, _WebSocketDisconnect):
+        return True
+    if isinstance(exc, RuntimeError):
+        message = str(exc).lower()
+        return (
+            "close message has been sent" in message
+            or "websocket is not connected" in message
+            or "cannot call" in message and "close" in message
+        )
+    return False
 
 
 def _disable_nagle(ws: Any) -> None:

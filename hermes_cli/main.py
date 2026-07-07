@@ -9726,11 +9726,42 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 text=True,
             )
             if pull_result.returncode != 0:
-                # ff-only failed — local and remote have diverged (e.g. upstream
-                # force-pushed or rebase).  Since local changes are already
-                # stashed, reset to match the remote exactly.
+                # ff-only can fail because the local checkout carries commits
+                # that are not on origin/<branch>. Do not silently remove them
+                # from the active branch.
+                local_commit_count = _count_commits_between(
+                    git_cmd, PROJECT_ROOT, f"origin/{branch}", "HEAD"
+                )
+                if local_commit_count != 0:
+                    print()
+                    print(
+                        "✗ Fast-forward not possible: this checkout has local commits."
+                    )
+                    if local_commit_count > 0:
+                        print(
+                            f"  Local commits not on origin/{branch}: {local_commit_count}"
+                        )
+                    else:
+                        print(
+                            "  Hermes could not prove the local branch has no private commits."
+                        )
+                    print()
+                    print("  To keep your local fixes, save them before updating:")
+                    print("    git branch hermes-local-backup")
+                    print(f"    git checkout -B hermes-update-integration origin/{branch}")
+                    print("    git cherry-pick <local-commit>...")
+                    print()
+                    print(
+                        "  If this is a fully managed install, review the branch "
+                        "and discard local commits manually."
+                    )
+                    sys.exit(1)
+
+                # No local commits are ahead of the fetched remote tip. This
+                # remains safe for managed installs after an upstream rewrite.
                 print(
-                    "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
+                    "  ⚠ Fast-forward not possible, resetting clean checkout "
+                    "to match remote..."
                 )
                 reset_result = subprocess.run(
                     git_cmd + ["reset", "--hard", f"origin/{branch}"],

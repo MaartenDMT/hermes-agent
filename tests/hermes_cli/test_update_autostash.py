@@ -530,6 +530,7 @@ def test_install_heartbeat_prints_when_dependency_install_is_silent(monkeypatch,
 def _make_update_side_effect(
     current_branch="main",
     commit_count="3",
+    local_commit_count="0",
     ff_only_fails=False,
     reset_fails=False,
     fetch_fails=False,
@@ -549,6 +550,10 @@ def _make_update_side_effect(
             return SimpleNamespace(stdout=f"{current_branch}\n", stderr="", returncode=0)
         if "checkout" in joined and "main" in joined:
             return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if "rev-list" in joined and "origin/main..HEAD" in joined:
+            return SimpleNamespace(
+                stdout=f"{local_commit_count}\n", stderr="", returncode=0
+            )
         if "rev-list" in joined:
             return SimpleNamespace(stdout=f"{commit_count}\n", stderr="", returncode=0)
         if "--ff-only" in joined:
@@ -568,22 +573,51 @@ def _make_update_side_effect(
     return side_effect, recorded
 
 
-def test_cmd_update_falls_back_to_reset_when_ff_only_fails(monkeypatch, tmp_path, capsys):
-    """When --ff-only fails (diverged history), update resets to origin/{branch}."""
+def test_cmd_update_aborts_when_ff_only_fails_with_local_commits(
+    monkeypatch, tmp_path, capsys
+):
+    """When --ff-only fails with local commits, update refuses to discard them."""
     _setup_update_mocks(monkeypatch, tmp_path)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
 
-    side_effect, recorded = _make_update_side_effect(ff_only_fails=True)
+    side_effect, recorded = _make_update_side_effect(
+        ff_only_fails=True,
+        local_commit_count="2",
+    )
+    monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
+
+    with pytest.raises(SystemExit, match="1"):
+        hermes_main.cmd_update(SimpleNamespace())
+
+    reset_calls = [c for c in recorded if "reset" in c and "--hard" in c]
+    assert len(reset_calls) == 0
+
+    out = capsys.readouterr().out
+    assert "Fast-forward not possible" in out
+    assert "Local commits not on origin/main: 2" in out
+    assert "git cherry-pick <local-commit>..." in out
+
+
+def test_cmd_update_keeps_reset_fallback_when_ff_only_fails_without_local_commits(
+    monkeypatch, tmp_path, capsys
+):
+    """A clean managed checkout may still realign with origin after ff-only fails."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    side_effect, recorded = _make_update_side_effect(
+        ff_only_fails=True,
+        local_commit_count="0",
+    )
     monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
 
     hermes_main.cmd_update(SimpleNamespace())
 
     reset_calls = [c for c in recorded if "reset" in c and "--hard" in c]
     assert len(reset_calls) == 1
-    assert reset_calls[0] == ["git", "reset", "--hard", "origin/main"]
 
     out = capsys.readouterr().out
-    assert "Fast-forward not possible" in out
+    assert "resetting clean checkout to match remote" in out
 
 
 def test_cmd_update_no_reset_when_ff_only_succeeds(monkeypatch, tmp_path):

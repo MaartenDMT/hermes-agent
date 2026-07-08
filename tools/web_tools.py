@@ -272,7 +272,8 @@ def _get_extract_backend() -> str:
     Selection priority:
     1. ``web.extract_backend`` (per-capability override)
     2. ``web.backend`` (shared fallback — existing behavior)
-    3. Auto-detect from env vars
+    3. ``local_first`` when extraction is otherwise unset
+    4. Auto-detect from env vars
     """
     return _get_capability_backend("extract")
 
@@ -326,6 +327,8 @@ def _get_capability_backend(capability: str) -> str:
                 return active.name
         except Exception as exc:  # noqa: BLE001
             logger.debug("active web provider lookup failed: %s", exc)
+    if capability == "extract" and _is_backend_available("local_first"):
+        return "local_first"
     return _get_backend()
 
 

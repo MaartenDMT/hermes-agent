@@ -266,6 +266,85 @@ class TestDDGSBackendWiring:
         assert web_tools.check_web_api_key() is True
 
 
+class TestExtractBackendSelection:
+    _register_providers = staticmethod(register_all_web_providers)
+
+    @pytest.fixture(autouse=True)
+    def _populate_web_registry(self):
+        self._register_providers()
+        yield
+        from agent.web_search_registry import _reset_for_tests
+        _reset_for_tests()
+
+    def test_empty_config_auto_detects_ddgs_for_search_but_local_first_for_extract(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(
+            web_tools,
+            "_load_web_config",
+            lambda: {"backend": "", "search_backend": "", "extract_backend": ""},
+        )
+        monkeypatch.setattr(web_tools, "_has_env", lambda _key: False)
+        monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
+
+        assert web_tools._get_search_backend() == "ddgs"
+        assert web_tools._get_extract_backend() == "local_first"
+
+    def test_empty_extract_backend_does_not_auto_select_hosted_paid_extractor(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(
+            web_tools,
+            "_load_web_config",
+            lambda: {"backend": "", "search_backend": "", "extract_backend": ""},
+        )
+        monkeypatch.setattr(web_tools, "_has_env", lambda key: key == "TAVILY_API_KEY")
+        monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
+
+        assert web_tools._get_search_backend() == "tavily"
+        assert web_tools._get_extract_backend() == "local_first"
+
+    def test_shared_search_only_backend_falls_back_to_local_first_for_extract(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(
+            web_tools,
+            "_load_web_config",
+            lambda: {"backend": "ddgs", "search_backend": "", "extract_backend": ""},
+        )
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
+
+        assert web_tools._get_search_backend() == "ddgs"
+        assert web_tools._get_extract_backend() == "local_first"
+
+    def test_explicit_local_first_extract_backend_is_honored(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(
+            web_tools,
+            "_load_web_config",
+            lambda: {"backend": "", "search_backend": "", "extract_backend": "local_first"},
+        )
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
+
+        assert web_tools._get_extract_backend() == "local_first"
+
+    @pytest.mark.parametrize("backend", ["firecrawl", "tavily", "exa", "parallel"])
+    def test_explicit_hosted_extract_backend_is_honored(self, monkeypatch, backend):
+        from tools import web_tools
+
+        monkeypatch.setattr(
+            web_tools,
+            "_load_web_config",
+            lambda: {"backend": "", "search_backend": "", "extract_backend": backend},
+        )
+        monkeypatch.setattr(web_tools, "_is_backend_available", lambda name: name == backend)
+
+        assert web_tools._get_extract_backend() == backend
+
+
 # ---------------------------------------------------------------------------
 # ddgs is search-only: web_extract returns a clear error
 # ---------------------------------------------------------------------------

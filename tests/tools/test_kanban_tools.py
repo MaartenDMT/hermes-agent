@@ -317,11 +317,13 @@ def test_complete_metadata_round_trips_through_show(worker_env):
 
     handoff = {
         "changed_files": ["hermes_cli/kanban.py"],
-        "verification": ["pytest tests/tools/test_kanban_tools.py -q"],
-        "dependencies": [],
-        "blocked_reason": None,
+        "commands_run": ["scripts/run_tests.sh tests/tools/test_kanban_tools.py"],
+        "verification_results": ["focused tests passed"],
+        "commit_hash": "abc1234",
+        "final_git_status": "clean",
         "retry_notes": "none",
         "residual_risk": ["dashboard rendering not exercised"],
+        "review_required": False,
     }
 
     complete_out = kt._handle_complete({
@@ -335,6 +337,120 @@ def test_complete_metadata_round_trips_through_show(worker_env):
     assert shown["task"]["status"] == "done"
     assert shown["runs"][-1]["summary"] == "finished with structured evidence"
     assert shown["runs"][-1]["metadata"] == handoff
+
+
+def test_complete_accepts_compliant_repo_evidence(worker_env):
+    from tools import kanban_tools as kt
+
+    metadata = {
+        "changed_files": ["tools/kanban_tools.py"],
+        "commands_run": ["scripts/run_tests.sh tests/tools/test_kanban_tools.py"],
+        "verification_results": ["passed"],
+        "commit_hash": "abc1234",
+        "final_git_status": "clean",
+        "no_task_state_update_reason": "Kanban callback only; no task-state file changed",
+        "residual_risk": [],
+        "review_required": False,
+    }
+
+    out = kt._handle_complete({
+        "summary": "implemented callback validation for Kanban completion",
+        "metadata": metadata,
+    })
+    assert json.loads(out)["ok"] is True
+
+
+def test_complete_blocks_repo_evidence_missing_required_fields(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_complete({
+        "summary": "changed repo files",
+        "metadata": {
+            "changed_files": ["tools/kanban_tools.py"],
+            "commands_run": ["scripts/run_tests.sh tests/tools/test_kanban_tools.py"],
+        },
+    })
+    err = json.loads(out).get("error", "")
+    assert "kanban_complete incomplete" in err
+    assert "command_results or verification_results" in err
+    assert "commit_hash or no_commit_reason" in err
+    assert "final_git_status" in err
+    assert "residual_risk" in err
+    assert "review_required" in err
+
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, worker_env).status == "running"
+    finally:
+        conn.close()
+
+
+def test_complete_preserves_non_code_completion(worker_env):
+    from tools import kanban_tools as kt
+
+    out = kt._handle_complete({
+        "summary": "read the task and answered the question",
+        "metadata": {"non_code": True, "residual_risk": []},
+    })
+    assert json.loads(out)["ok"] is True
+
+
+def test_complete_accepts_read_only_repo_no_file_changes(worker_env):
+    from tools import kanban_tools as kt
+
+    out = kt._handle_complete({
+        "summary": "inspected the repo and found no changes were needed",
+        "metadata": {
+            "repo": "C:\\Programming\\example",
+            "no_file_changes": True,
+            "commands_run": ["git status --short"],
+            "command_results": ["repo was clean"],
+            "no_commit_reason": "read-only inspection",
+            "final_git_status": "clean",
+            "residual_risk": [],
+            "read_only": True,
+        },
+    })
+    assert json.loads(out)["ok"] is True
+
+
+def test_complete_requires_review_required_when_code_changed(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_complete({
+        "summary": "changed code",
+        "metadata": {
+            "changed_files": ["tools/kanban_tools.py"],
+            "commands_run": ["scripts/run_tests.sh tests/tools/test_kanban_tools.py"],
+            "verification_results": ["passed"],
+            "no_commit_reason": "verification-only test case",
+            "final_git_status": "dirty with agent-made changes",
+            "residual_risk": [],
+        },
+    })
+    assert "review_required" in json.loads(out).get("error", "")
+
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, worker_env).status == "running"
+    finally:
+        conn.close()
+
+    retry = kt._handle_complete({
+        "summary": "changed code",
+        "metadata": {
+            "changed_files": ["tools/kanban_tools.py"],
+            "commands_run": ["scripts/run_tests.sh tests/tools/test_kanban_tools.py"],
+            "verification_results": ["passed"],
+            "no_commit_reason": "verification-only test case",
+            "final_git_status": "dirty with agent-made changes",
+            "residual_risk": [],
+            "review_required": True,
+        },
+    })
+    assert json.loads(retry)["ok"] is True
 
 
 def test_complete_stamps_worker_session_id_from_env(monkeypatch, worker_env):

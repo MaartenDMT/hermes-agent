@@ -132,6 +132,173 @@ def _stamp_worker_session_metadata(
     return stamped
 
 
+def _has_non_empty_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _metadata_has_any(metadata: dict[str, Any], names: set[str]) -> bool:
+    return any(_has_non_empty_value(metadata.get(name)) for name in names)
+
+
+def _metadata_has_key(metadata: dict[str, Any], names: set[str]) -> bool:
+    return any(name in metadata for name in names)
+
+
+def _mentions_task_state(*values: Any) -> bool:
+    needles = (
+        "task_state",
+        "task-state",
+        "task state",
+        "kanban",
+        "todo.md",
+        "goals.md",
+        "roadmap.md",
+    )
+    for value in values:
+        if value is None:
+            continue
+        try:
+            text = (
+                json.dumps(value, sort_keys=True)
+                if not isinstance(value, str)
+                else value
+            )
+        except TypeError:
+            text = str(value)
+        lowered = text.casefold()
+        if any(needle in lowered for needle in needles):
+            return True
+    return False
+
+
+def _validate_worker_completion_evidence(
+    *,
+    summary: Optional[str],
+    result: Optional[str],
+    metadata: Optional[dict],
+    args: dict,
+) -> Optional[str]:
+    """Return a retryable error when a repo/worktree callback lacks evidence.
+
+    Plain research and ops completions can still close with only a summary.
+    Structured repo callbacks must carry the MAOS evidence contract before the
+    task leaves ``running``.
+    """
+    if metadata is None:
+        metadata = {}
+    merged: dict[str, Any] = dict(metadata)
+    for key, value in args.items():
+        if key in {
+            "summary",
+            "result",
+            "metadata",
+            "created_cards",
+            "artifacts",
+            "board",
+            "task_id",
+        }:
+            continue
+        merged.setdefault(key, value)
+
+    non_code_markers = {
+        "non_code",
+        "read_only",
+        "no_file_changes",
+        "no_files_changed",
+        "no_file_changes_reason",
+        "no_changed_files_reason",
+    }
+    code_markers = {
+        "changed_files",
+        "code_changed",
+        "file_changes",
+        "files_changed",
+        "worktree",
+        "worktree_status",
+        "repo",
+        "repository",
+        "commit_hash",
+        "commit_hashes",
+        "no_commit_reason",
+        "final_git_status",
+        "git_status",
+    }
+    if not _metadata_has_any(merged, code_markers):
+        return None
+
+    code_changed = bool(merged.get("code_changed"))
+    if _metadata_has_any(
+        merged,
+        {"changed_files", "file_changes", "files_changed"},
+    ):
+        code_changed = True
+    read_only_or_no_files = (
+        _metadata_has_any(merged, non_code_markers)
+        and not code_changed
+    )
+    if read_only_or_no_files and not _metadata_has_any(
+        merged,
+        {"repo", "repository", "worktree", "worktree_status", "final_git_status", "git_status"},
+    ):
+        return None
+
+    missing: list[str] = []
+    if not (
+        _metadata_has_any(
+            merged,
+            {"changed_files", "file_changes", "files_changed"},
+        )
+        or _metadata_has_any(
+            merged,
+            {
+                "no_file_changes",
+                "no_files_changed",
+                "no_file_changes_reason",
+                "no_changed_files_reason",
+            },
+        )
+    ):
+        missing.append("changed_files or explicit no_file_changes")
+    if not _metadata_has_any(merged, {"commands_run", "commands"}):
+        missing.append("commands_run")
+    if not _metadata_has_any(
+        merged,
+        {"command_results", "verification_results", "test_results"},
+    ):
+        missing.append("command_results or verification_results")
+    if not _metadata_has_any(
+        merged,
+        {"commit_hash", "commit_hashes", "no_commit_reason"},
+    ):
+        missing.append("commit_hash or no_commit_reason")
+    if not _metadata_has_any(merged, {"final_git_status", "git_status"}):
+        missing.append("final_git_status")
+    if _mentions_task_state(summary, result, merged) and not _metadata_has_any(
+        merged,
+        {"task_state_update", "task_state_updates", "no_task_state_update_reason"},
+    ):
+        missing.append("task_state_update or no_task_state_update_reason")
+    if not _metadata_has_key(merged, {"residual_risk", "residual_risks"}):
+        missing.append("residual_risk")
+    if code_changed and not _metadata_has_key(merged, {"review_required"}):
+        missing.append("review_required")
+
+    if not missing:
+        return None
+    return (
+        "kanban_complete incomplete: repo/worktree completion evidence is "
+        f"missing {', '.join(missing)}. Your task is still in-flight "
+        "(no state change). Retry kanban_complete with corrected metadata, "
+        "or call kanban_block if the evidence cannot be produced."
+    )
+
+
 def _enforce_worker_task_ownership(tid: str) -> Optional[str]:
     """Reject worker-driven destructive calls on foreign task IDs.
 
@@ -587,6 +754,14 @@ def _handle_complete(args: dict, **kw) -> str:
         return tool_error(
             f"metadata must be an object/dict, got {type(metadata).__name__}"
         )
+    evidence_err = _validate_worker_completion_evidence(
+        summary=summary,
+        result=result,
+        metadata=metadata,
+        args=args,
+    )
+    if evidence_err:
+        return tool_error(evidence_err)
     metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")
     try:
@@ -1201,8 +1376,11 @@ KANBAN_COMPLETE_SCHEMA = {
         "downstream workers and humans. Prefer ``summary`` for a "
         "human-readable 1-3 sentence description of what you did; put "
         "machine-readable facts in ``metadata`` (changed_files, "
-        "tests_run, decisions, findings, etc). At least one of "
-        "``summary`` or ``result`` is required. If you created new "
+        "commands_run, verification_results, commit_hash or "
+        "no_commit_reason, final_git_status, residual_risk, "
+        "review_required, decisions, findings, etc). At least one of "
+        "``summary`` or ``result`` is required. Repo/worktree "
+        "completions are validated before the task moves to done. If you created new "
         "tasks via ``kanban_create`` during this run, list their ids "
         "in ``created_cards`` — the kernel verifies them so phantom "
         "references are caught before they leak into downstream "
@@ -1232,8 +1410,13 @@ KANBAN_COMPLETE_SCHEMA = {
                 "type": "object",
                 "description": (
                     "Free-form dict of structured facts about this "
-                    "attempt — {\"changed_files\": [...], \"tests_run\": 12, "
-                    "\"findings\": [...]}. Surfaced to downstream "
+                    "attempt. Repo/worktree callbacks should include "
+                    "changed_files or no_file_changes, commands_run, "
+                    "command_results or verification_results, commit_hash "
+                    "or no_commit_reason, final_git_status, residual_risk, "
+                    "review_required when code changed, and "
+                    "task_state_update or no_task_state_update_reason when "
+                    "Kanban/task-state was mentioned. Surfaced to downstream "
                     "workers alongside ``summary``."
                 ),
             },

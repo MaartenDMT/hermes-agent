@@ -15,7 +15,7 @@ Covers:
 from __future__ import annotations
 
 import io
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -111,6 +111,86 @@ def test_existing_binary_finds_windows_wrapper_in_staging(tmp_path, monkeypatch)
     assert install_mod.detect_status("pyright") == "installed"
 
 
+def test_existing_binary_resolves_windows_npm_wrapper_symlink(tmp_path, monkeypatch):
+    """A symlinked npm .cmd shim must execute from its real .bin location.
+
+    npm-generated Windows shims use %~dp0 to find their package.  If Hermes
+    returns the lsp/bin symlink path, the shim resolves modules relative to
+    lsp/bin instead of node_modules/.bin and exits during initialize.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from agent.lsp import install as install_mod
+
+    monkeypatch.setattr(install_mod, "_is_windows", lambda: True)
+    monkeypatch.setattr(install_mod.shutil, "which", lambda _name: None)
+
+    npm_bin = install_mod.hermes_lsp_bin_dir().parent / "node_modules" / ".bin"
+    npm_bin.mkdir(parents=True)
+    target = npm_bin / "pyright-langserver.cmd"
+    target.write_text("@echo off\n")
+    target.chmod(0o755)
+
+    link = install_mod.hermes_lsp_bin_dir() / "pyright-langserver.cmd"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation unavailable on this platform")
+
+    assert install_mod._existing_binary("pyright-langserver") == str(target)
+
+
+def test_existing_binary_finds_windows_npm_bin_wrapper(tmp_path, monkeypatch):
+    """Existing npm installs should be discovered from node_modules/.bin."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from agent.lsp import install as install_mod
+
+    monkeypatch.setattr(install_mod, "_is_windows", lambda: True)
+    monkeypatch.setattr(install_mod.shutil, "which", lambda _name: None)
+
+    wrapper = (
+        install_mod.hermes_lsp_bin_dir().parent
+        / "node_modules"
+        / ".bin"
+        / "pyright-langserver.cmd"
+    )
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("@echo off\n")
+    wrapper.chmod(0o755)
+
+    assert install_mod._existing_binary("pyright-langserver") == str(wrapper)
+
+
+def test_install_npm_returns_windows_cmd_from_npm_bin(tmp_path, monkeypatch):
+    """Do not symlink or copy npm .cmd wrappers into lsp/bin on Windows."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from agent.lsp import install as install_mod
+
+    def fake_run(cmd, **kwargs):
+        wrapper = (
+            install_mod.hermes_lsp_bin_dir().parent
+            / "node_modules"
+            / ".bin"
+            / "pyright-langserver.cmd"
+        )
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text("@echo off\n")
+        wrapper.chmod(0o755)
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr(install_mod, "_is_windows", lambda: True)
+    monkeypatch.setattr(install_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(install_mod.shutil, "which", lambda c: "/usr/bin/npm" if c == "npm" else None)
+
+    resolved = install_mod._install_npm("pyright", "pyright-langserver")
+
+    assert resolved is not None
+    assert resolved.endswith(r"node_modules\.bin\pyright-langserver.cmd")
+    assert not (install_mod.hermes_lsp_bin_dir() / "pyright-langserver.cmd").exists()
+
+
 def test_install_pip_finds_windows_scripts_launcher(tmp_path, monkeypatch):
     """pip console scripts can land in Scripts/ on native Windows."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -156,7 +236,9 @@ def test_backend_warnings_quiet_when_bash_and_shellcheck_both_present(tmp_path, 
     from agent.lsp import cli as lsp_cli
 
     def which(name):
-        return f"/usr/bin/{name}"  # both found
+        if name in {"bash-language-server", "shellcheck"}:
+            return f"/usr/bin/{name}"
+        return None
 
     with patch("shutil.which", side_effect=which):
         notes = lsp_cli._backend_warnings()
@@ -199,6 +281,104 @@ def test_status_output_includes_backend_warnings_section(tmp_path, monkeypatch):
     output = buf.getvalue()
     assert "Backend warnings" in output
     assert "shellcheck" in output
+
+
+def test_backend_warnings_fires_when_powershell_bundle_missing(tmp_path, monkeypatch):
+    """PowerShell status needs both a host and the PSES module bundle."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("PSES_BUNDLE_PATH", raising=False)
+
+    from agent.lsp import cli as lsp_cli
+
+    def which(name):
+        if name == "pwsh":
+            return "/usr/bin/pwsh"
+        return None
+
+    with patch("shutil.which", side_effect=which):
+        notes = lsp_cli._backend_warnings()
+
+    assert len(notes) == 1
+    assert "PowerShellEditorServices" in notes[0]
+    assert "bundle" in notes[0]
+
+
+def test_backend_warnings_quiet_when_powershell_bundle_present(tmp_path, monkeypatch):
+    """A valid PSES bundle should not warn."""
+    home = tmp_path / "hermes_home"
+    bundle = home / "lsp" / "PowerShellEditorServices" / "PowerShellEditorServices"
+    bundle.mkdir(parents=True)
+    (bundle / "Start-EditorServices.ps1").write_text("# fake")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("PSES_BUNDLE_PATH", raising=False)
+
+    from agent.lsp import cli as lsp_cli
+
+    def which(name):
+        if name == "pwsh":
+            return "/usr/bin/pwsh"
+        return None
+
+    with patch("shutil.which", side_effect=which):
+        notes = lsp_cli._backend_warnings()
+
+    assert notes == []
+
+
+def test_powershell_status_is_manual_only_when_bundle_missing(tmp_path, monkeypatch):
+    """A PowerShell host alone is not enough for a usable PowerShell LSP."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("PSES_BUNDLE_PATH", raising=False)
+
+    from agent.lsp import cli as lsp_cli
+
+    def which(name):
+        if name == "pwsh":
+            return "/usr/bin/pwsh"
+        return None
+
+    with patch("shutil.which", side_effect=which):
+        assert lsp_cli._server_binary_status("powershell") == "manual-only"
+
+
+def test_powershell_status_installed_when_bundle_present(tmp_path, monkeypatch):
+    """PowerShell LSP is installed only when host and bundle are present."""
+    home = tmp_path / "hermes_home"
+    bundle = home / "lsp" / "PowerShellEditorServices" / "PowerShellEditorServices"
+    bundle.mkdir(parents=True)
+    (bundle / "Start-EditorServices.ps1").write_text("# fake")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("PSES_BUNDLE_PATH", raising=False)
+
+    from agent.lsp import cli as lsp_cli
+
+    def which(name):
+        if name == "pwsh":
+            return "/usr/bin/pwsh"
+        return None
+
+    with patch("shutil.which", side_effect=which):
+        assert lsp_cli._server_binary_status("powershell") == "installed"
+
+
+def test_install_powershell_stops_at_manual_bundle_message(tmp_path, monkeypatch):
+    """Install command must not report pwsh as a complete PSES install."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("PSES_BUNDLE_PATH", raising=False)
+
+    from agent.lsp import cli as lsp_cli
+
+    def which(name):
+        if name == "pwsh":
+            return "/usr/bin/pwsh"
+        return None
+
+    err = io.StringIO()
+    with patch("shutil.which", side_effect=which), redirect_stderr(err):
+        rc = lsp_cli._cmd_install("powershell")
+
+    assert rc == 1
+    assert "manual install" in err.getvalue()
 
 
 # ---------------------------------------------------------------------------

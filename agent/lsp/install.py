@@ -148,6 +148,19 @@ def _existing_binary(name: str) -> Optional[str]:
     """Probe the staging dir + PATH for a binary named ``name``."""
     for staged in _native_binary_candidates(hermes_lsp_bin_dir() / name):
         if staged.exists() and os.access(staged, os.X_OK):
+            if _is_windows() and staged.is_symlink() and staged.suffix.lower() in {
+                ".cmd",
+                ".bat",
+                ".ps1",
+            }:
+                try:
+                    return str(staged.resolve(strict=True))
+                except OSError:
+                    pass
+            return str(staged)
+    npm_bin = hermes_lsp_bin_dir().parent / "node_modules" / ".bin" / name
+    for staged in _native_binary_candidates(npm_bin):
+        if staged.exists() and os.access(staged, os.X_OK):
             return str(staged)
     on_path = shutil.which(name)
     if on_path:
@@ -282,6 +295,8 @@ def _install_npm(
     nm_bin = staging / "node_modules" / ".bin" / bin_name
     for c in _native_binary_candidates(nm_bin):
         if c.exists():
+            if _is_windows() and c.suffix.lower() in {".cmd", ".bat", ".ps1"}:
+                return str(c)
             # Symlink into our `lsp/bin/` for stable PATH access.
             link = hermes_lsp_bin_dir() / c.name
             if not link.exists():

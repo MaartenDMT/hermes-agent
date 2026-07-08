@@ -91,7 +91,6 @@ def run_lsp_command(args: argparse.Namespace) -> int:
 def _cmd_status(emit_json: bool) -> int:
     from agent.lsp import get_service
     from agent.lsp.servers import SERVERS
-    from agent.lsp.install import detect_status
 
     svc = get_service()
     service_active = svc is not None
@@ -106,7 +105,7 @@ def _cmd_status(emit_json: bool) -> int:
                     "server_id": s.server_id,
                     "extensions": list(s.extensions),
                     "description": s.description,
-                    "binary_status": detect_status(_recipe_pkg_for(s.server_id)),
+                    "binary_status": _server_binary_status(s.server_id),
                 }
                 for s in SERVERS
             ],
@@ -154,8 +153,7 @@ def _cmd_status(emit_json: bool) -> int:
     out.append("Registered Servers")
     out.append("==================")
     for s in SERVERS:
-        pkg = _recipe_pkg_for(s.server_id)
-        status = detect_status(pkg)
+        status = _server_binary_status(s.server_id)
         marker = {
             "installed": "✓",
             "missing": "·",
@@ -175,11 +173,9 @@ def _cmd_status(emit_json: bool) -> int:
 
 def _cmd_list(installed_only: bool) -> int:
     from agent.lsp.servers import SERVERS
-    from agent.lsp.install import detect_status
 
     for s in SERVERS:
-        pkg = _recipe_pkg_for(s.server_id)
-        status = detect_status(pkg)
+        status = _server_binary_status(s.server_id)
         if installed_only and status != "installed":
             continue
         sys.stdout.write(
@@ -189,12 +185,18 @@ def _cmd_list(installed_only: bool) -> int:
 
 
 def _cmd_install(server_id: str) -> int:
-    from agent.lsp.install import try_install, INSTALL_RECIPES, detect_status
+    from agent.lsp.install import try_install, INSTALL_RECIPES
     pkg = _recipe_pkg_for(server_id)
-    pre_status = detect_status(pkg)
+    pre_status = _server_binary_status(server_id)
     if pre_status == "installed":
         sys.stdout.write(f"{server_id} already installed\n")
         return 0
+    if pre_status == "manual-only":
+        sys.stderr.write(
+            f"{server_id}: this server requires a manual install. "
+            f"See documentation.\n"
+        )
+        return 1
     sys.stdout.write(f"installing {server_id} (pkg={pkg}) ...\n")
     sys.stdout.flush()
     bin_path = try_install(pkg, "auto")
@@ -274,6 +276,21 @@ def _recipe_pkg_for(server_id: str) -> str:
     return aliases.get(server_id, server_id)
 
 
+def _server_binary_status(server_id: str) -> str:
+    """Return CLI-facing install status for a registry server id."""
+    from agent.lsp.install import detect_status
+
+    status = detect_status(_recipe_pkg_for(server_id))
+    if server_id != "powershell" or status != "installed":
+        return status
+
+    from agent.lsp.servers import ServerContext, _find_pses_bundle
+
+    if _find_pses_bundle(ServerContext(workspace_root="")) is None:
+        return "manual-only"
+    return status
+
+
 def _backend_warnings() -> list:
     """Return human-readable notes about LSP backend tools that are missing
     in a way that won't surface elsewhere.
@@ -296,4 +313,16 @@ def _backend_warnings() -> list:
             "diagnostics will be empty (apt: shellcheck, brew: shellcheck, "
             "scoop: shellcheck)."
         )
+    powershell_host = _shutil.which("pwsh") or _shutil.which("powershell")
+    if powershell_host:
+        from agent.lsp.servers import ServerContext, _find_pses_bundle
+
+        if _find_pses_bundle(ServerContext(workspace_root="")) is None:
+            notes.append(
+                "pwsh is installed but the PowerShellEditorServices bundle is "
+                "missing - PowerShell LSP will stay unavailable until the "
+                "bundle is extracted and configured via "
+                "lsp.servers.powershell.command, initialization_options.bundlePath, "
+                "PSES_BUNDLE_PATH, or <HERMES_HOME>/lsp/PowerShellEditorServices."
+            )
     return notes

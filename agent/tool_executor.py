@@ -869,8 +869,13 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     agent._record_file_mutation_result(
                         function_name, function_args, function_result, is_error,
                     )
+                    _reminder = agent._record_broad_action_reminder_tool_call(
+                        function_name, function_args, function_result,
+                    )
+                    if _reminder:
+                        function_result = str(function_result).rstrip() + "\n\n" + _reminder
                 except Exception as _ver_err:
-                    logging.debug("file-mutation verifier record failed: %s", _ver_err)
+                    logging.debug("tool mutation reminder record failed: %s", _ver_err)
 
             if not blocked and agent.tool_progress_callback:
                 try:
@@ -1537,8 +1542,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent._record_file_mutation_result(
                     function_name, function_args, function_result, _is_error_result,
                 )
+                _reminder = agent._record_broad_action_reminder_tool_call(
+                    function_name, function_args, function_result,
+                )
+                if _reminder:
+                    function_result = str(function_result).rstrip() + "\n\n" + _reminder
             except Exception as _ver_err:
-                logging.debug("file-mutation verifier record failed: %s", _ver_err)
+                logging.debug("tool mutation reminder record failed: %s", _ver_err)
 
         if not _execution_blocked and agent.tool_progress_callback:
             try:

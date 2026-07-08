@@ -189,6 +189,12 @@ from agent.tool_guardrails import (
     append_toolguard_guidance,
     toolguard_synthetic_result,
 )
+from agent.broad_action_reminders import (
+    BroadActionReminderState,
+    format_broad_action_reminder,
+    observe_tool_call as observe_broad_action_tool_call,
+    pop_broad_action_reminder,
+)
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
     file_mutation_result_landed,
@@ -2811,6 +2817,28 @@ class AIAgent:
         else:
             for path in targets:
                 state.pop(path, None)
+
+    def _record_broad_action_reminder_tool_call(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        result: Any,
+    ) -> str:
+        """Record write-capable tool calls and return the first live reminder."""
+
+        state = getattr(self, "_turn_broad_action_reminder_state", None)
+        if state is None:
+            return ""
+        observe_broad_action_tool_call(state, tool_name, args, result)
+        return pop_broad_action_reminder(state)
+
+    @staticmethod
+    def _format_broad_action_reminder_footer(state: BroadActionReminderState | None) -> str:
+        """Render the advisory footer for broad or drift-prone mutations."""
+
+        if state is not None and getattr(state, "reminder_emitted", False):
+            return ""
+        return format_broad_action_reminder(state)
 
     def _file_mutation_verifier_enabled(self) -> bool:
         """Check whether the per-turn file-mutation verifier footer is on.

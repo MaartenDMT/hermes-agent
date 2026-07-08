@@ -278,6 +278,14 @@ def finalize_turn(
         except Exception as _ver_err:
             logger.debug("file-mutation verifier footer failed: %s", _ver_err)
 
+        try:
+            _broad_state = getattr(agent, "_turn_broad_action_reminder_state", None)
+            footer = agent._format_broad_action_reminder_footer(_broad_state)
+            if footer:
+                final_response = final_response.rstrip() + "\n\n" + footer
+        except Exception as _reminder_err:
+            logger.debug("broad-action reminder footer failed: %s", _reminder_err)
+
     # Turn-completion explainer.
     # When a turn ends abnormally after substantive work — empty content
     # after retries, a partial/truncated stream, a still-pending tool

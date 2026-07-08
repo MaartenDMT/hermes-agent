@@ -26,6 +26,7 @@ import pytest
 from run_agent import (
     AIAgent,
     _FILE_MUTATING_TOOLS,
+    BroadActionReminderState,
     _extract_error_preview,
     _extract_file_mutation_targets,
     _extract_landed_file_mutation_paths,
@@ -130,6 +131,7 @@ def _bare_agent() -> AIAgent:
     agent = object.__new__(AIAgent)
     agent._turn_failed_file_mutations = {}
     agent._turn_file_mutation_paths = set()
+    agent._turn_broad_action_reminder_state = BroadActionReminderState()
     return agent
 
 
@@ -294,6 +296,53 @@ class TestRecordFileMutationResult:
         # No path → nothing to key on, state stays empty.  The per-turn
         # state is about file paths, not individual tool-call IDs.
         assert agent._turn_failed_file_mutations == {}
+
+
+class TestBroadActionReminder:
+    def test_record_write_actions_and_format_footer(self):
+        agent = _bare_agent()
+
+        reminders = [
+            agent._record_broad_action_reminder_tool_call(
+                "write_file",
+                {"path": path, "content": "x"},
+                json.dumps({"success": True, "files_modified": [path]}),
+            )
+            for path in ("src/a.py", "src/b.py", "src/c.py")
+        ]
+
+        assert reminders[:2] == ["", ""]
+        assert "Broad edit volume detected" in reminders[2]
+        assert "worker dispatch, Kanban, or coding agents" in reminders[2]
+        assert agent._format_broad_action_reminder_footer(
+            agent._turn_broad_action_reminder_state,
+        ) == ""
+
+    def test_read_only_session_stays_quiet(self):
+        agent = _bare_agent()
+
+        reminder = agent._record_broad_action_reminder_tool_call(
+            "read_file",
+            {"path": "src/app.py"},
+            json.dumps({"content": "x"}),
+        )
+
+        assert reminder == ""
+        assert agent._format_broad_action_reminder_footer(
+            agent._turn_broad_action_reminder_state,
+        ) == ""
+
+    def test_artifact_path_warning(self):
+        agent = _bare_agent()
+
+        reminder = agent._record_broad_action_reminder_tool_call(
+            "write_file",
+            {"path": "coverage/report.json", "content": "{}"},
+            json.dumps({"success": True, "files_modified": ["coverage/report.json"]}),
+        )
+
+        assert "Drift-prone generated/runtime artifact" in reminder
+        assert "`coverage/report.json`" in reminder
 
 
 # ---------------------------------------------------------------------------

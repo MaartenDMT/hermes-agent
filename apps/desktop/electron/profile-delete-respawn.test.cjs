@@ -60,3 +60,23 @@ test('hermes:api handler routes profile-delete requests to the primary backend',
     'handler should pass routeProfile (not raw profile) to ensureBackend'
   )
 })
+
+test('primary profile routing honors the legacy active_profile fallback', () => {
+  const source = readElectronFile('main.cjs')
+
+  assert.match(
+    source,
+    /function readLegacyActiveHermesProfile\(\)/,
+    'main process should be able to read the legacy Hermes active_profile file'
+  )
+  assert.match(
+    source,
+    /path\.join\(HERMES_HOME, 'active_profile'\)/,
+    'legacy active_profile lookup should use the resolved Hermes root'
+  )
+  assert.match(
+    source,
+    /return readActiveDesktopProfile\(\) \|\| readLegacyActiveHermesProfile\(\) \|\| 'default'/,
+    'primaryProfileKey should match the backend profile selected by legacy active_profile'
+  )
+})

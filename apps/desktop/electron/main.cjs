@@ -4802,6 +4802,20 @@ function readActiveDesktopProfile() {
   return null
 }
 
+function readLegacyActiveHermesProfile() {
+  try {
+    const name = fs.readFileSync(path.join(HERMES_HOME, 'active_profile'), 'utf8').trim()
+
+    if (name && (name === 'default' || PROFILE_NAME_RE.test(name))) {
+      return name
+    }
+  } catch {
+    // Missing or malformed means the Python backend will fall back to default.
+  }
+
+  return null
+}
+
 function writeActiveDesktopProfile(name) {
   const value = typeof name === 'string' ? name.trim() : ''
 
@@ -5252,7 +5266,7 @@ async function waitForBackendExit(child, timeoutMs = 5000) {
 // returns the desktop's stored preference, or null when unset (legacy launch
 // that defers to active_profile / default).
 function primaryProfileKey() {
-  return readActiveDesktopProfile() || 'default'
+  return readActiveDesktopProfile() || readLegacyActiveHermesProfile() || 'default'
 }
 
 // Resolve a backend connection for the given profile. Routes the primary

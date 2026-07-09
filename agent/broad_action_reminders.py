@@ -74,6 +74,30 @@ EDITOR_BACKUP_SUFFIXES = (
 
 PACKAGE_MANAGER_RE = re.compile(r"(?<![\w.-])(?P<pm>npm|yarn)\s+(?P<cmd>install|i|add|remove|rm|run|exec|dlx|create)\b")
 PATH_TOKEN_RE = re.compile(r"(?<![\w.-])(?:[A-Za-z]:[\\/][^\s\"'`<>|]+|[/~.]?[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+)+)")
+SHELL_SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\|)\s*")
+OUTPUT_REDIRECT_RE = re.compile(r"(^|[^<])>{1,2}(?![>&])")
+READ_ONLY_COMMAND_RE = re.compile(
+    r"^(?:"
+    r"git\s+(?:status|show|diff|log|branch|rev-parse|ls-files|grep)\b"
+    r"|python(?:\d+(?:\.\d+)?)?\s+-m\s+py_compile\b"
+    r"|py(?:thon)?\s+-m\s+py_compile\b"
+    r"|pytest\b"
+    r"|python(?:\d+(?:\.\d+)?)?\s+-m\s+pytest\b"
+    r"|py(?:thon)?\s+-m\s+pytest\b"
+    r"|scripts[/\\]run_tests\.sh\b"
+    r")",
+    re.IGNORECASE,
+)
+MUTATING_COMMAND_RE = re.compile(
+    r"^(?:"
+    r"git\s+(?:add|am|apply|bisect|checkout|cherry-pick|clean|commit|merge|mv|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag)\b"
+    r"|(?:rm|del|erase|rmdir|move|mv|copy|cp|mkdir|md|touch|tee)\b"
+    r"|(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item|rename-item|clear-content)\b"
+    r"|python(?:\d+(?:\.\d+)?)?\s+(?!-m\s+(?:py_compile|pytest)\b)"
+    r"|py(?:thon)?\s+(?!-m\s+(?:py_compile|pytest)\b)"
+    r")",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -100,17 +124,26 @@ def observe_tool_call(
     if tool_name not in WRITE_CAPABLE_TOOL_NAMES:
         return
 
-    state.write_actions += 1
     paths = _extract_paths(tool_name, args or {}, result)
-    state.paths.update(paths)
-    for path in paths:
-        if is_drift_prone_artifact_path(path):
-            state.generated_paths.add(path)
 
-    if tool_name in {"terminal", "execute_code"}:
+    is_mutating_action = True
+    if tool_name == "terminal":
+        text = _command_text(args or {})
+        is_mutating_action = _shell_command_is_mutating(text)
+        for pm in package_manager_nudges(text, cwd=_cwd_from_args(args or {})):
+            state.package_manager_nudges.add(pm)
+    elif tool_name == "execute_code":
         text = _command_text(args or {})
         for pm in package_manager_nudges(text, cwd=_cwd_from_args(args or {})):
             state.package_manager_nudges.add(pm)
+
+    if is_mutating_action:
+        state.write_actions += 1
+        state.paths.update(paths)
+
+    for path in paths:
+        if is_drift_prone_artifact_path(path):
+            state.generated_paths.add(path)
 
 
 def format_broad_action_reminder(state: BroadActionReminderState | None) -> str:
@@ -207,6 +240,49 @@ def package_manager_nudges(command_text: str, *, cwd: str | None = None) -> set[
             continue
         nudges.add(pm)
     return nudges
+
+
+def _shell_command_is_mutating(command_text: str) -> bool:
+    if not command_text:
+        return False
+
+    for segment in _shell_command_segments(command_text):
+        normalized = _strip_shell_wrappers(segment)
+        if not normalized:
+            continue
+        if _package_manager_command_is_mutating(normalized):
+            return True
+        if OUTPUT_REDIRECT_RE.search(normalized):
+            return True
+        if READ_ONLY_COMMAND_RE.match(normalized):
+            continue
+        if MUTATING_COMMAND_RE.match(normalized):
+            return True
+    return False
+
+
+def _shell_command_segments(command_text: str) -> list[str]:
+    return [segment.strip() for segment in SHELL_SEGMENT_SPLIT_RE.split(command_text) if segment.strip()]
+
+
+def _strip_shell_wrappers(segment: str) -> str:
+    segment = segment.strip()
+    while segment.startswith(("@", "&")):
+        segment = segment[1:].lstrip()
+    if segment.lower().startswith("cmd /c "):
+        segment = segment[7:].lstrip()
+    if segment.lower().startswith("powershell -command "):
+        segment = segment[20:].lstrip()
+    if segment.lower().startswith("pwsh -command "):
+        segment = segment[14:].lstrip()
+    return segment.strip("\"' ")
+
+
+def _package_manager_command_is_mutating(command_text: str) -> bool:
+    for match in PACKAGE_MANAGER_RE.finditer(command_text):
+        if match.group("cmd") in {"install", "i", "add", "remove", "rm", "dlx", "create"}:
+            return True
+    return False
 
 
 def _extract_paths(tool_name: str, args: Mapping[str, Any], result: Any) -> set[str]:

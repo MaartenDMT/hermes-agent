@@ -21,6 +21,29 @@ def test_read_only_tool_stays_quiet():
     assert format_broad_action_reminder(state) == ""
 
 
+def test_read_only_terminal_verification_stays_quiet(tmp_path):
+    state = BroadActionReminderState()
+    commands = [
+        "git status --short",
+        "git show HEAD:agent/broad_action_reminders.py",
+        "git diff --check",
+        "python -m py_compile agent/broad_action_reminders.py tests/agent/test_broad_action_reminders.py",
+        "pytest tests/agent/test_broad_action_reminders.py",
+    ]
+
+    for command in commands:
+        observe_tool_call(
+            state,
+            "terminal",
+            {"command": command, "cwd": str(tmp_path)},
+            json.dumps({"exit_code": 0}),
+        )
+
+    assert state.write_actions == 0
+    assert state.paths == set()
+    assert format_broad_action_reminder(state) == ""
+
+
 def test_repeated_write_capable_actions_trigger_scope_reminder():
     state = BroadActionReminderState()
 
@@ -51,6 +74,41 @@ def test_two_write_actions_stay_quiet_without_artifacts_or_package_nudges():
         )
 
     assert format_broad_action_reminder(state) == ""
+
+
+def test_mutating_terminal_actions_trigger_scope_reminder(tmp_path):
+    state = BroadActionReminderState()
+
+    for command in (
+        "git add src/a.py",
+        "Set-Content -LiteralPath src/b.py -Value x",
+        "python scripts/generate.py --out src/c.py",
+    ):
+        observe_tool_call(
+            state,
+            "terminal",
+            {"command": command, "cwd": str(tmp_path)},
+            json.dumps({"exit_code": 0}),
+        )
+
+    out = format_broad_action_reminder(state)
+    assert "Broad edit volume detected" in out
+    assert state.write_actions == 3
+
+
+def test_terminal_artifact_target_warns_without_broad_volume(tmp_path):
+    state = BroadActionReminderState()
+
+    observe_tool_call(
+        state,
+        "terminal",
+        {"command": "git diff -- dist/app.js", "cwd": str(tmp_path)},
+        json.dumps({"exit_code": 0}),
+    )
+
+    out = format_broad_action_reminder(state)
+    assert "Drift-prone generated/runtime artifact path" in out
+    assert "Broad edit volume detected" not in out
 
 
 def test_artifact_path_triggers_warning_below_volume_threshold():

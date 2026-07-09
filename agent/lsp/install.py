@@ -132,22 +132,50 @@ def hermes_lsp_bin_dir() -> Path:
 
 def _native_binary_candidates(base: Path) -> list[Path]:
     """Return platform-native executable candidates for a staged binary."""
-    candidates = [base]
+    candidates = []
     if _is_windows():
-        existing = {str(base).lower()}
         for suffix in _WINDOWS_WRAPPER_SUFFIXES:
             candidate = Path(str(base) + suffix)
+            candidates.append(candidate)
+    candidates.append(base)
+    if _is_windows():
+        existing: set[str] = set()
+        ordered: list[Path] = []
+        for candidate in candidates:
             key = str(candidate).lower()
             if key not in existing:
-                candidates.append(candidate)
+                ordered.append(candidate)
                 existing.add(key)
+        return ordered
     return candidates
+
+
+def _prefer_windows_native_binary(path: Path) -> Path:
+    """Resolve Windows npm shims to a native wrapper when one is available."""
+    if not _is_windows():
+        return path
+    candidates = [path]
+    if path.is_symlink():
+        try:
+            resolved = path.resolve(strict=True)
+            candidates.insert(0, resolved)
+        except OSError:
+            pass
+    for candidate in candidates:
+        if candidate.suffix.lower() in _WINDOWS_WRAPPER_SUFFIXES:
+            return candidate
+        for suffix in _WINDOWS_WRAPPER_SUFFIXES:
+            wrapper = Path(str(candidate) + suffix)
+            if wrapper.exists() and os.access(wrapper, os.X_OK):
+                return wrapper
+    return path
 
 
 def _existing_binary(name: str) -> Optional[str]:
     """Probe the staging dir + PATH for a binary named ``name``."""
     for staged in _native_binary_candidates(hermes_lsp_bin_dir() / name):
         if staged.exists() and os.access(staged, os.X_OK):
+            staged = _prefer_windows_native_binary(staged)
             if _is_windows() and staged.is_symlink() and staged.suffix.lower() in {
                 ".cmd",
                 ".bat",
@@ -161,6 +189,7 @@ def _existing_binary(name: str) -> Optional[str]:
     npm_bin = hermes_lsp_bin_dir().parent / "node_modules" / ".bin" / name
     for staged in _native_binary_candidates(npm_bin):
         if staged.exists() and os.access(staged, os.X_OK):
+            staged = _prefer_windows_native_binary(staged)
             return str(staged)
     on_path = shutil.which(name)
     if on_path:

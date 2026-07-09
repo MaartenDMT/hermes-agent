@@ -162,6 +162,53 @@ def test_existing_binary_finds_windows_npm_bin_wrapper(tmp_path, monkeypatch):
     assert install_mod._existing_binary("pyright-langserver") == str(wrapper)
 
 
+def test_existing_binary_prefers_windows_cmd_over_extensionless_npm_shim(tmp_path, monkeypatch):
+    """Extensionless npm shims are shell scripts and fail with WinError 193."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from agent.lsp import install as install_mod
+
+    monkeypatch.setattr(install_mod, "_is_windows", lambda: True)
+    monkeypatch.setattr(install_mod.shutil, "which", lambda _name: None)
+
+    npm_bin = install_mod.hermes_lsp_bin_dir().parent / "node_modules" / ".bin"
+    npm_bin.mkdir(parents=True)
+    extensionless = npm_bin / "typescript-language-server"
+    wrapper = npm_bin / "typescript-language-server.cmd"
+    extensionless.write_text("#!/bin/sh\n")
+    wrapper.write_text("@echo off\n")
+    extensionless.chmod(0o755)
+    wrapper.chmod(0o755)
+
+    assert install_mod._existing_binary("typescript-language-server") == str(wrapper)
+
+
+def test_existing_binary_prefers_windows_cmd_for_stale_extensionless_bin_symlink(tmp_path, monkeypatch):
+    """Old installs may have lsp/bin symlinks to extensionless npm shims."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from agent.lsp import install as install_mod
+
+    monkeypatch.setattr(install_mod, "_is_windows", lambda: True)
+    monkeypatch.setattr(install_mod.shutil, "which", lambda _name: None)
+
+    npm_bin = install_mod.hermes_lsp_bin_dir().parent / "node_modules" / ".bin"
+    npm_bin.mkdir(parents=True)
+    extensionless = npm_bin / "typescript-language-server"
+    wrapper = npm_bin / "typescript-language-server.cmd"
+    extensionless.write_text("#!/bin/sh\n")
+    wrapper.write_text("@echo off\n")
+    extensionless.chmod(0o755)
+    wrapper.chmod(0o755)
+    stale_link = install_mod.hermes_lsp_bin_dir() / "typescript-language-server"
+    try:
+        stale_link.symlink_to(extensionless)
+    except OSError:
+        pytest.skip("symlink creation unavailable on this platform")
+
+    assert install_mod._existing_binary("typescript-language-server") == str(wrapper)
+
+
 def test_install_npm_returns_windows_cmd_from_npm_bin(tmp_path, monkeypatch):
     """Do not symlink or copy npm .cmd wrappers into lsp/bin on Windows."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

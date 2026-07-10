@@ -664,6 +664,26 @@ def test_oneshot_prints_nonempty_final_response(monkeypatch, capsys):
     assert captured.err == ""
 
 
+def test_oneshot_disables_detached_async_delivery_during_agent_run(monkeypatch, capsys):
+    """A one-shot process must not promise callbacks after it exits."""
+    _stub_plugin_discovery(monkeypatch)
+    import hermes_cli.oneshot as oneshot_mod
+    from gateway.session_context import async_delivery_supported
+
+    observed = []
+
+    def _capture_capability(*_args, **_kwargs):
+        observed.append(async_delivery_supported())
+        return "done", {}
+
+    monkeypatch.setattr(oneshot_mod, "_run_agent", _capture_capability)
+
+    assert oneshot_mod.run_oneshot("hello") == 0
+    assert observed == [False]
+    assert async_delivery_supported() is True
+    assert capsys.readouterr().out == "done\n"
+
+
 def test_oneshot_fails_closed_on_agent_exception(monkeypatch, capsys):
     _stub_plugin_discovery(monkeypatch)
     import hermes_cli.oneshot as oneshot_mod

@@ -433,6 +433,28 @@ class TestDelegateTask(unittest.TestCase):
 
         self.assertIs(mock_child._print_fn, sink)
 
+    def test_child_explicitly_disables_kanban_toolset(self):
+        """A child must not complete or block its parent's Kanban task."""
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["terminal", "kanban"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+
+            _build_child_agent(
+                task_index=0,
+                goal="Return a bounded result",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertIn("kanban", kwargs["disabled_toolsets"])
+
     def test_child_uses_thinking_callback_when_progress_callback_available(self):
         parent = _make_mock_parent(depth=0)
         parent.tool_progress_callback = MagicMock()

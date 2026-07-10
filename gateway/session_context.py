@@ -89,10 +89,11 @@ _SESSION_PROFILE: ContextVar = ContextVar("HERMES_SESSION_PROFILE", default=_UNS
 # Whether the current session's delivery channel can route an ASYNC completion
 # back to the agent AFTER the current turn ends (i.e. wake a fresh turn).
 #
-# True  — CLI (in-process completion_queue drain) and the real gateway
+# True  - interactive CLI (in-process completion_queue drain) and the real gateway
 #         platforms (Telegram/Discord/Slack/...), which hold a persistent
 #         outbound channel and run the watcher/drain loops.
-# False — stateless request/response adapters (the API server: every route,
+# False - bounded processes and stateless request/response adapters (one-shot
+#         CLI/Kanban workers and the API server: every route,
 #         spec and proprietary, tears down its channel when the turn ends, so
 #         a background completion that finishes later has nowhere to go).
 #
@@ -101,8 +102,9 @@ _SESSION_PROFILE: ContextVar = ContextVar("HERMES_SESSION_PROFILE", default=_UNS
 # ``async_delivery_supported()`` and refuse to hand out a promise the channel
 # can't keep — turning a silent no-op into an explicit contract.
 #
-# Default _UNSET => treated as supported, so CLI (which never sets a platform)
-# and any contextvar-unaware path keep working. Stateless adapters opt OUT by
+# Default _UNSET => treated as supported, so interactive CLI and any
+# contextvar-unaware path keep working. Bounded entrypoints and stateless
+# adapters opt OUT by
 # setting ``supports_async_delivery = False`` on the adapter class; the gateway
 # propagates that into this contextvar at session-bind time.
 _SESSION_ASYNC_DELIVERY: ContextVar = ContextVar("HERMES_SESSION_ASYNC_DELIVERY", default=_UNSET)
@@ -320,15 +322,25 @@ def async_delivery_supported() -> bool:
     """Whether the current session can deliver a background completion later.
 
     Returns ``False`` only when the active session was explicitly bound by a
-    stateless adapter (the API server) that cannot route a notification back to
-    the agent after the turn ends. CLI, cron, and the real gateway platforms —
-    and any path that never bound the contextvar — return ``True``.
+    bounded entrypoint or stateless adapter that cannot route a notification
+    back to the agent after the turn ends. Interactive CLI, cron, and the real
+    gateway platforms, plus any path that never bound the contextvar, return
+    ``True``.
 
     Tools that promise async delivery (``terminal`` notify_on_complete /
     watch_patterns, ``delegate_task`` background=True) consult this before
     registering a watcher / dispatching a detached child, so they can refuse a
     promise the channel can't keep instead of silently no-op'ing.
     """
+    import os
+
+    # Dispatcher-spawned Kanban workers are bounded to one task. They use the
+    # classic single-query CLI path, then the process exits. The dispatcher
+    # already marks that lifecycle with HERMES_KANBAN_TASK, so detached work
+    # must fall back to synchronous execution before the worker disappears.
+    if os.getenv("HERMES_KANBAN_TASK"):
+        return False
+
     value = _SESSION_ASYNC_DELIVERY.get()
     if value is _UNSET:
         return True

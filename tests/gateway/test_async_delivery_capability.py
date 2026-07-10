@@ -85,6 +85,12 @@ class TestAsyncDeliverySupported:
         clear_session_vars(tokens)
         assert async_delivery_supported() is True
 
+    def test_kanban_worker_is_unsupported_even_when_context_is_unbound(self, monkeypatch):
+        """A dispatcher worker exits after one task and cannot deliver later."""
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_callback_smoke")
+
+        assert async_delivery_supported() is False
+
 
 # ---------------------------------------------------------------------------
 # Adapter capability flag

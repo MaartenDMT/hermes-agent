@@ -223,6 +223,13 @@ def run_oneshot(
     response: Optional[str] = None
     result: dict = {}
     failure: BaseException | None = None
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    session_tokens = set_session_vars(
+        platform="cli",
+        source="oneshot",
+        async_delivery=False,
+    )
     try:
         with redirect_stdout(devnull), redirect_stderr(devnull):
             try:
@@ -243,6 +250,7 @@ def run_oneshot(
                 # See #30623.
                 failure = exc
     finally:
+        clear_session_vars(session_tokens)
         try:
             devnull.close()
         except Exception:

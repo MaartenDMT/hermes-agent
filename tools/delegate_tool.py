@@ -53,6 +53,11 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
     ]
 )
 
+# Toolsets that delegated children must never inherit as a whole. Kanban is a
+# parent-worker lifecycle surface: a child may return evidence, but it must not
+# complete, block, or otherwise mutate the task that owns its parent process.
+DELEGATE_BLOCKED_TOOLSETS = frozenset({"kanban"})
+
 
 # ---------------------------------------------------------------------------
 # Subagent approval callbacks
@@ -773,7 +778,9 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     """
     # Composite toolsets that should never pass through to children, even
     # though their individual tools aren't all in DELEGATE_BLOCKED_TOOLS.
-    _COMPOSITE_BLOCKED_TOOLSETS = frozenset({"delegation", "code_execution"})
+    _COMPOSITE_BLOCKED_TOOLSETS = frozenset(
+        {"delegation", "code_execution"}
+    ) | DELEGATE_BLOCKED_TOOLSETS
     blocked_toolset_names = {
         name
         for name, defn in TOOLSETS.items()
@@ -1312,6 +1319,10 @@ def _build_child_agent(
         prefill_messages=getattr(parent_agent, "prefill_messages", None),
         fallback_model=parent_fallback,
         enabled_toolsets=child_toolsets,
+        # HERMES_KANBAN_TASK causes the resolver to inject the Kanban lifecycle
+        # surface for the parent worker. Explicit subtraction is required here
+        # so the in-process child cannot complete or block its parent's card.
+        disabled_toolsets=sorted(DELEGATE_BLOCKED_TOOLSETS),
         quiet_mode=True,
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
@@ -2767,10 +2778,9 @@ def delegate_task(
         from tools.async_delegation import dispatch_async_delegation_batch
         from tools.approval import get_current_session_key
 
-        # Stateless request/response sessions (the API server / WebUI path)
-        # cannot route a detached subagent result back to the agent after the
-        # turn ends — there is no persistent channel and the adapter's send()
-        # is a no-op, so a background dispatch would silently never re-enter the
+        # Bounded processes and stateless request/response sessions cannot
+        # route a detached subagent result back to the agent after the turn
+        # ends. A background dispatch would silently never re-enter the
         # conversation (issue #10760). Fall back to SYNCHRONOUS execution: the
         # work still runs and its result returns in this same response, which is
         # strictly better than a handle that never resolves. Mirrors the
@@ -2783,15 +2793,16 @@ def delegate_task(
         if not _async_ok:
             logger.info(
                 "delegate_task: async delivery unsupported on this session "
-                "(stateless HTTP API); running the batch synchronously instead."
+                "(no persistent completion channel); running the batch "
+                "synchronously instead."
             )
             _sync_result = _execute_and_aggregate()
             if isinstance(_sync_result, dict):
                 _sync_result["note"] = (
-                    "background=true is not available on this endpoint (stateless "
-                    "HTTP API — no channel to deliver a detached subagent result "
-                    "after the turn ends), so the subagent(s) ran SYNCHRONOUSLY and "
-                    "the result is included above."
+                    "background=true is not available in this execution mode "
+                    "because it has no persistent channel to deliver a detached "
+                    "subagent result after the turn ends, so the subagent(s) ran "
+                    "SYNCHRONOUSLY and the result is included above."
                 )
             return json.dumps(_sync_result, ensure_ascii=False)
 

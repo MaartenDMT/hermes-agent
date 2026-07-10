@@ -39,9 +39,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Activate venv ───────────────────────────────────────────────────────────
 VENV=""
+PYTHON=""
 for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
   if [ -f "$candidate/bin/activate" ]; then
     VENV="$candidate"
+    PYTHON="$candidate/bin/python"
+    break
+  fi
+  if [ -f "$candidate/Scripts/python.exe" ]; then
+    VENV="$candidate"
+    PYTHON="$candidate/Scripts/python.exe"
     break
   fi
 done
@@ -50,9 +57,6 @@ if [ -z "$VENV" ]; then
   echo "error: no virtualenv found in $REPO_ROOT/.venv or $REPO_ROOT/venv" >&2
   exit 1
 fi
-
-PYTHON="$VENV/bin/python"
-
 
 # ── Live-gateway plugin (computed before we drop env) ───────────────────────
 EXTRA_PYTHONPATH=""
@@ -74,9 +78,20 @@ cd "$REPO_ROOT"
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
+  ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+  ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
+  ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
+  ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
+  ${APPDATA:+APPDATA="$APPDATA"} \
+  ${SYSTEMDRIVE:+SYSTEMDRIVE="$SYSTEMDRIVE"} \
+  ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+  ${TEMP:+TEMP="$TEMP"} \
+  ${TMP:+TMP="$TMP"} \
   TZ=UTC \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
+  PYTHONUTF8=1 \
+  PYTHONIOENCODING=UTF-8 \
   PYTHONHASHSEED=0 \
   PYTHONDONTWRITEBYTECODE=1 \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \

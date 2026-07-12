@@ -1,5 +1,6 @@
 """Tests for cron/jobs.py — schedule parsing, job CRUD, and due-job detection."""
 
+import json
 import threading
 import pytest
 from datetime import datetime, timedelta, timezone
@@ -236,6 +237,31 @@ def tmp_cron_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
     monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
     return tmp_path
+
+
+class TestJobStoreEncoding:
+    def test_recovers_cp1252_watcher_output_and_rewrites_utf8(self, tmp_cron_dir):
+        """A Windows-default-encoded store must preserve watcher output and
+        be rewritten through the normal UTF-8 persistence path.
+        """
+        from cron import jobs as cron_jobs
+
+        jobs = [{
+            "id": "watcher-output",
+            "name": "Watcher",
+            "last_error": "Watcher output — source changed",
+        }]
+        cron_jobs.JOBS_FILE.parent.mkdir(parents=True)
+        cron_jobs.JOBS_FILE.write_text(
+            json.dumps({"jobs": jobs}, ensure_ascii=False),
+            encoding="cp1252",
+        )
+
+        assert load_jobs() == jobs
+
+        persisted = json.loads(cron_jobs.JOBS_FILE.read_bytes().decode("utf-8"))
+        assert persisted["jobs"] == jobs
+        assert load_jobs() == jobs
 
 
 class TestJobCRUD:

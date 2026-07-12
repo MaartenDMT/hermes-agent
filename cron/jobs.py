@@ -685,28 +685,54 @@ def get_ticker_success_age() -> Optional[float]:
 # =============================================================================
 
 def load_jobs() -> List[Dict[str, Any]]:
-    """Load all jobs from storage."""
+    """Load all jobs from storage.
+
+    Jobs are persisted as UTF-8.  Older Windows processes could write a valid
+    JSON document using the active cp1252 locale instead, which makes a normal
+    text read fail before JSON parsing.  Decode bytes explicitly so that one
+    legacy recovery can preserve every job record, then re-save through the
+    normal atomic UTF-8 writer.
+    """
     ensure_dirs()
     if not JOBS_FILE.exists():
         return []
 
     _strict_retry = False  # track whether we used the strict=False fallback
+    _legacy_windows_encoding = False
 
     try:
-        with open(JOBS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        raw = JOBS_FILE.read_bytes()
+    except OSError as e:
+        logger.error("IOError reading jobs.json: %s", e)
+        raise RuntimeError(f"Failed to read cron database: {e}") from e
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as utf8_error:
+        try:
+            text = raw.decode("cp1252")
+        except UnicodeDecodeError as legacy_error:
+            logger.error("Failed to decode jobs.json as UTF-8 or cp1252: %s", legacy_error)
+            raise RuntimeError(
+                f"Cron database corrupted and unrepairable: {legacy_error}"
+            ) from legacy_error
+        _legacy_windows_encoding = True
+        logger.warning(
+            "jobs.json was written with legacy Windows cp1252 encoding; "
+            "recovering it as UTF-8 (%s)",
+            utf8_error,
+        )
+
+    try:
+        data = json.loads(text)
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         _strict_retry = True
         try:
-            with open(JOBS_FILE, 'r', encoding='utf-8') as f:
-                data = json.loads(f.read(), strict=False)
+            data = json.loads(text, strict=False)
         except Exception as e:
             logger.error("Failed to auto-repair jobs.json: %s", e)
             raise RuntimeError(f"Cron database corrupted and unrepairable: {e}") from e
-    except IOError as e:
-        logger.error("IOError reading jobs.json: %s", e)
-        raise RuntimeError(f"Failed to read cron database: {e}") from e
 
     # Validate the top-level JSON shape: accept a dict (expected) or a bare
     # list (auto-repair). Anything else (str/number/null) is corruption that
@@ -714,17 +740,23 @@ def load_jobs() -> List[Dict[str, Any]]:
     # down the whole cron subsystem.
     if isinstance(data, dict):
         jobs = data.get("jobs", [])
-        if _strict_retry and jobs:
-            # Hit control-character corruption — rewrite with proper escaping.
+        if _strict_retry or _legacy_windows_encoding:
+            # Re-serialize malformed strings or a legacy Windows-codepage
+            # document with the normal explicit UTF-8 atomic writer.
             save_jobs(jobs)
-            logger.warning("Auto-repaired jobs.json (had invalid control characters)")
+            logger.warning("Auto-repaired jobs.json (%s)", (
+                "had invalid control characters" if _strict_retry
+                else "was written with legacy Windows cp1252 encoding"
+            ))
         return jobs
     if isinstance(data, list):
         # Bare array — likely saved/edited outside save_jobs(). Wrap it back
         # into the expected {"jobs": [...]} structure.
-        if data:
+        if data or _strict_retry or _legacy_windows_encoding:
             save_jobs(data)
-            logger.warning("Auto-repaired jobs.json (bare list wrapped as dict)")
+            logger.warning("Auto-repaired jobs.json (bare list wrapped as dict%s)", (
+                "; legacy Windows cp1252 encoding" if _legacy_windows_encoding else ""
+            ))
         return data
 
     raise RuntimeError(

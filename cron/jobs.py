@@ -684,7 +684,7 @@ def get_ticker_success_age() -> Optional[float]:
 # Job CRUD Operations
 # =============================================================================
 
-def load_jobs() -> List[Dict[str, Any]]:
+def load_jobs(_rechecking_repair: bool = False) -> List[Dict[str, Any]]:
     """Load all jobs from storage.
 
     Jobs are persisted as UTF-8.  Older Windows processes could write a valid
@@ -692,6 +692,10 @@ def load_jobs() -> List[Dict[str, Any]]:
     text read fail before JSON parsing.  Decode bytes explicitly so that one
     legacy recovery can preserve every job record, then re-save through the
     normal atomic UTF-8 writer.
+
+    Before a recovery rewrites the store, it rereads under ``_jobs_lock()``.
+    This prevents a stale recovery read from atomically replacing a newer
+    scheduler save that completed before the recovery acquired the lock.
     """
     ensure_dirs()
     if not JOBS_FILE.exists():
@@ -741,6 +745,9 @@ def load_jobs() -> List[Dict[str, Any]]:
     if isinstance(data, dict):
         jobs = data.get("jobs", [])
         if _strict_retry or _legacy_windows_encoding:
+            if not _rechecking_repair:
+                with _jobs_lock():
+                    return load_jobs(_rechecking_repair=True)
             # Re-serialize malformed strings or a legacy Windows-codepage
             # document with the normal explicit UTF-8 atomic writer.
             save_jobs(jobs)
@@ -753,6 +760,9 @@ def load_jobs() -> List[Dict[str, Any]]:
         # Bare array — likely saved/edited outside save_jobs(). Wrap it back
         # into the expected {"jobs": [...]} structure.
         if data or _strict_retry or _legacy_windows_encoding:
+            if not _rechecking_repair:
+                with _jobs_lock():
+                    return load_jobs(_rechecking_repair=True)
             save_jobs(data)
             logger.warning("Auto-repaired jobs.json (bare list wrapped as dict%s)", (
                 "; legacy Windows cp1252 encoding" if _legacy_windows_encoding else ""

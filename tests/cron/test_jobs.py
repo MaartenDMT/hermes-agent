@@ -240,6 +240,19 @@ def tmp_cron_dir(tmp_path, monkeypatch):
 
 
 class TestJobStoreEncoding:
+    def test_valid_utf8_bytes_are_not_rewritten(self, tmp_cron_dir):
+        from cron import jobs as cron_jobs
+
+        expected_jobs = [{"id": "utf8", "name": "Café"}]
+        original_bytes = json.dumps(
+            {"jobs": expected_jobs}, ensure_ascii=False, indent=4
+        ).encode("utf-8")
+        cron_jobs.JOBS_FILE.parent.mkdir(parents=True)
+        cron_jobs.JOBS_FILE.write_bytes(original_bytes)
+
+        assert load_jobs() == expected_jobs
+        assert cron_jobs.JOBS_FILE.read_bytes() == original_bytes
+
     def test_recovers_cp1252_watcher_output_and_rewrites_utf8(self, tmp_cron_dir):
         """A Windows-default-encoded store must preserve watcher output and
         be rewritten through the normal UTF-8 persistence path.
@@ -262,6 +275,58 @@ class TestJobStoreEncoding:
         persisted = json.loads(cron_jobs.JOBS_FILE.read_bytes().decode("utf-8"))
         assert persisted["jobs"] == jobs
         assert load_jobs() == jobs
+
+    def test_recovery_rechecks_after_a_concurrent_save(self, tmp_cron_dir, monkeypatch):
+        """A recovery must not overwrite a save that lands after its stale read."""
+        from cron import jobs as cron_jobs
+
+        stale_jobs = [{"id": "old", "name": "Café"}]
+        new_jobs = [{"id": "new", "name": "current"}]
+        cron_jobs.JOBS_FILE.parent.mkdir(parents=True)
+        cron_jobs.JOBS_FILE.write_text(
+            json.dumps({"jobs": stale_jobs}, ensure_ascii=False), encoding="cp1252"
+        )
+
+        original_read_bytes = type(cron_jobs.JOBS_FILE).read_bytes
+        writer_done = threading.Event()
+        writer = None
+        intercepted = False
+
+        def read_stale_then_save(path):
+            nonlocal intercepted, writer
+            raw = original_read_bytes(path)
+            if path == cron_jobs.JOBS_FILE and not intercepted:
+                intercepted = True
+
+                def save_new_jobs():
+                    save_jobs(new_jobs)
+                    writer_done.set()
+
+                writer = threading.Thread(target=save_new_jobs)
+                writer.start()
+                writer_done.wait(timeout=1)
+            return raw
+
+        monkeypatch.setattr(type(cron_jobs.JOBS_FILE), "read_bytes", read_stale_then_save)
+
+        assert load_jobs() == new_jobs
+        assert writer is not None
+        writer.join(timeout=1)
+        assert not writer.is_alive()
+        assert writer_done.is_set()
+        assert json.loads(cron_jobs.JOBS_FILE.read_bytes().decode("utf-8"))["jobs"] == new_jobs
+
+    def test_non_cp1252_bytes_remain_untouched_after_recovery_failure(self, tmp_cron_dir):
+        from cron import jobs as cron_jobs
+
+        original_bytes = b'{"jobs": [{"id": "bad", "name": "\x81"}]}'
+        cron_jobs.JOBS_FILE.parent.mkdir(parents=True)
+        cron_jobs.JOBS_FILE.write_bytes(original_bytes)
+
+        with pytest.raises(RuntimeError, match="unrepairable"):
+            load_jobs()
+
+        assert cron_jobs.JOBS_FILE.read_bytes() == original_bytes
 
 
 class TestJobCRUD:

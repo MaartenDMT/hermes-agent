@@ -3462,6 +3462,8 @@ def claim_task(
     ``launch_fingerprint`` is bound to the run metadata for post-claim checks.
     Returns the claimed ``Task`` on success, otherwise ``None``.
     """
+    if conn.in_transaction:
+        raise RuntimeError("claim_task cannot run inside an active transaction")
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)

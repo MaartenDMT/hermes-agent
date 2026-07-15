@@ -4848,6 +4848,24 @@ def test_task_launch_revision_changes_with_task_and_ordered_comments(kanban_home
     assert reassigned != retry_changed
 
 
+def test_claim_task_rejects_nested_transaction_before_hook(kanban_home, monkeypatch):
+    hooks = []
+    monkeypatch.setattr(kb, "_fire_kanban_lifecycle_hook", lambda *args, **kwargs: hooks.append((args, kwargs)))
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="review", assignee="reviewer")
+
+        with kb.write_txn(conn):
+            with pytest.raises(RuntimeError, match="cannot run inside an active transaction"):
+                kb.claim_task(conn, task_id, claimer="host:dispatcher")
+
+        task = kb.get_task(conn, task_id)
+        runs = kb.list_runs(conn, task_id)
+
+    assert task.status == "ready"
+    assert runs == []
+    assert hooks == []
+
+
 def test_claim_task_requires_matching_launch_revision(kanban_home):
     with kb.connect() as conn:
         task_id = kb.create_task(conn, title="review", assignee="reviewer", body="work_type: review")

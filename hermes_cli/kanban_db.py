@@ -3385,22 +3385,96 @@ def recompute_ready(
 # Claim / complete / block
 # ---------------------------------------------------------------------------
 
+_LAUNCH_REVISION_TASK_COLUMNS = (
+    "id",
+    "title",
+    "body",
+    "assignee",
+    "priority",
+    "created_by",
+    "created_at",
+    "workspace_kind",
+    "workspace_path",
+    "branch_name",
+    "project_id",
+    "tenant",
+    "consecutive_failures",
+    "max_runtime_seconds",
+    "workflow_template_id",
+    "current_step_key",
+    "skills",
+    "model_override",
+    "max_retries",
+    "goal_mode",
+    "goal_max_turns",
+    "session_id",
+)
+
+
+def task_launch_revision(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Hash the task inputs that may affect a worker launch.
+
+    Lifecycle fields changed by claiming are intentionally excluded so the
+    revision stays stable across a successful ``ready -> running`` claim.
+    Ordered comments are included because dispatch prompts consume them.
+    """
+    columns = ", ".join(_LAUNCH_REVISION_TASK_COLUMNS)
+    row = conn.execute(
+        f"SELECT {columns} FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    comments = conn.execute(
+        "SELECT id, author, body, created_at FROM task_comments "
+        "WHERE task_id = ? ORDER BY id",
+        (task_id,),
+    ).fetchall()
+    payload = {
+        "task": {name: row[name] for name in _LAUNCH_REVISION_TASK_COLUMNS},
+        "comments": [
+            {
+                "id": item["id"],
+                "author": item["author"],
+                "body": item["body"],
+                "created_at": item["created_at"],
+            }
+            for item in comments
+        ],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def claim_task(
     conn: sqlite3.Connection,
     task_id: str,
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    expected_revision: Optional[str] = None,
+    launch_fingerprint: Optional[str] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
-    Returns the claimed ``Task`` on success, ``None`` if the task was
-    already claimed (or is not in ``ready`` status).
+    When ``expected_revision`` is provided, the claim succeeds only when the
+    launch-relevant task row and ordered comments still match that revision.
+    ``launch_fingerprint`` is bound to the run metadata for post-claim checks.
+    Returns the claimed ``Task`` on success, otherwise ``None``.
     """
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        current_revision = task_launch_revision(conn, task_id)
+        if expected_revision is not None and current_revision != expected_revision:
+            _append_event(
+                conn,
+                task_id,
+                "claim_rejected",
+                {"reason": "task_revision_mismatch"},
+            )
+            return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -3468,13 +3542,23 @@ def claim_task(
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
+        run_metadata = None
+        if expected_revision is not None or launch_fingerprint is not None:
+            run_metadata = json.dumps(
+                {
+                    "task_revision": current_revision,
+                    "launch_fingerprint": launch_fingerprint,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
         run_cur = conn.execute(
             """
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                metadata, started_at
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -3483,6 +3567,7 @@ def claim_task(
                 lock,
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
+                run_metadata,
                 now,
             ),
         )
@@ -3505,6 +3590,90 @@ def claim_task(
         run_id=run_id,
     )
     return claimed
+
+
+def release_unstarted_claim(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    run_id: int,
+    claimer: str,
+    reason: str,
+) -> bool:
+    """Return an unchanged, unspawned claim to ``ready`` without a failure.
+
+    The task id, run id, and claim lock must all match, and neither the task
+    nor run may have a worker PID. This is only a pre-spawn rollback path.
+    """
+    now = int(time.time())
+    with write_txn(conn):
+        task_row = conn.execute(
+            "SELECT status, current_run_id, claim_lock, worker_pid "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        run_row = conn.execute(
+            "SELECT claim_lock, worker_pid, ended_at, metadata "
+            "FROM task_runs WHERE id = ? AND task_id = ?",
+            (run_id, task_id),
+        ).fetchone()
+        if (
+            task_row is None
+            or run_row is None
+            or task_row["status"] != "running"
+            or task_row["current_run_id"] != run_id
+            or task_row["claim_lock"] != claimer
+            or run_row["claim_lock"] != claimer
+            or task_row["worker_pid"] is not None
+            or run_row["worker_pid"] is not None
+            or run_row["ended_at"] is not None
+        ):
+            return False
+
+        try:
+            metadata = json.loads(run_row["metadata"]) if run_row["metadata"] else {}
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.update({"release_reason": reason, "released_before_spawn": True})
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'ready', claim_lock = NULL, claim_expires = NULL,
+                   worker_pid = NULL, current_run_id = NULL,
+                   last_heartbeat_at = NULL
+             WHERE id = ? AND status = 'running' AND current_run_id = ?
+               AND claim_lock = ? AND worker_pid IS NULL
+            """,
+            (task_id, run_id, claimer),
+        )
+        if cur.rowcount != 1:
+            return False
+        conn.execute(
+            """
+            UPDATE task_runs
+               SET status = 'released', outcome = 'released', summary = ?,
+                   metadata = ?, ended_at = ?, claim_lock = NULL,
+                   claim_expires = NULL, worker_pid = NULL
+             WHERE id = ? AND task_id = ? AND ended_at IS NULL
+            """,
+            (
+                reason,
+                json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                now,
+                run_id,
+                task_id,
+            ),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "claim_released",
+            {"reason": reason, "run_id": run_id},
+            run_id=run_id,
+        )
+    return True
 
 
 def claim_review_task(

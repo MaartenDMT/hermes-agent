@@ -4821,3 +4821,135 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+# ---------------------------------------------------------------------------
+# Launch-contract compare-and-claim
+# ---------------------------------------------------------------------------
+
+
+def test_task_launch_revision_changes_with_task_and_ordered_comments(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="review", assignee="reviewer", body="work_type: review")
+        initial = kb.task_launch_revision(conn, task_id)
+
+        kb.add_comment(conn, task_id, "user", "first")
+        with_comment = kb.task_launch_revision(conn, task_id)
+        kb.assign_task(conn, task_id, "finalreviewer")
+        reassigned = kb.task_launch_revision(conn, task_id)
+        conn.execute(
+            "UPDATE tasks SET consecutive_failures = 1 WHERE id = ?",
+            (task_id,),
+        )
+        retry_changed = kb.task_launch_revision(conn, task_id)
+
+    assert initial != with_comment
+    assert with_comment != reassigned
+    assert reassigned != retry_changed
+
+
+def test_claim_task_requires_matching_launch_revision(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="review", assignee="reviewer", body="work_type: review")
+        expected = kb.task_launch_revision(conn, task_id)
+        kb.add_comment(conn, task_id, "user", "changed after plan")
+
+        claimed = kb.claim_task(
+            conn,
+            task_id,
+            claimer="host:dispatcher",
+            expected_revision=expected,
+            launch_fingerprint="launch-v1",
+        )
+        task = kb.get_task(conn, task_id)
+        runs = kb.list_runs(conn, task_id)
+
+    assert claimed is None
+    assert task.status == "ready"
+    assert task.current_run_id is None
+    assert runs == []
+
+
+def test_claim_task_binds_fingerprint_and_preserves_revision(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="review", assignee="reviewer", body="work_type: review")
+        expected = kb.task_launch_revision(conn, task_id)
+
+        claimed = kb.claim_task(
+            conn,
+            task_id,
+            claimer="host:dispatcher",
+            expected_revision=expected,
+            launch_fingerprint="launch-v1",
+        )
+        after_claim = kb.task_launch_revision(conn, task_id)
+        run = kb.latest_run(conn, task_id)
+
+    assert claimed is not None
+    assert after_claim == expected
+    assert run.metadata["task_revision"] == expected
+    assert run.metadata["launch_fingerprint"] == "launch-v1"
+
+
+def test_release_unstarted_claim_is_neutral_and_strictly_guarded(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="review", assignee="reviewer", body="work_type: review")
+        expected = kb.task_launch_revision(conn, task_id)
+        claimed = kb.claim_task(
+            conn,
+            task_id,
+            claimer="host:dispatcher",
+            expected_revision=expected,
+            launch_fingerprint="launch-v1",
+        )
+        run_id = claimed.current_run_id
+
+        assert kb.release_unstarted_claim(
+            conn,
+            task_id,
+            run_id=run_id,
+            claimer="host:other",
+            reason="route changed",
+        ) is False
+        assert kb.release_unstarted_claim(
+            conn,
+            task_id,
+            run_id=run_id,
+            claimer="host:dispatcher",
+            reason="route changed",
+        ) is True
+
+        task = kb.get_task(conn, task_id)
+        run = kb.latest_run(conn, task_id)
+
+    assert task.status == "ready"
+    assert task.current_run_id is None
+    assert task.claim_lock is None
+    assert task.consecutive_failures == 0
+    assert run.outcome == "released"
+    assert run.metadata["launch_fingerprint"] == "launch-v1"
+    assert run.metadata["release_reason"] == "route changed"
+
+
+def test_release_unstarted_claim_refuses_spawned_worker(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="review", assignee="reviewer")
+        expected = kb.task_launch_revision(conn, task_id)
+        claimed = kb.claim_task(
+            conn,
+            task_id,
+            claimer="host:dispatcher",
+            expected_revision=expected,
+            launch_fingerprint="launch-v1",
+        )
+        kb._set_worker_pid(conn, task_id, 12345)
+
+        released = kb.release_unstarted_claim(
+            conn,
+            task_id,
+            run_id=claimed.current_run_id,
+            claimer="host:dispatcher",
+            reason="too late",
+        )
+
+    assert released is False

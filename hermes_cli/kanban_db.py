@@ -2311,14 +2311,30 @@ def write_txn(conn: sqlite3.Connection):
     task + recording an event, etc.).  A claim CAS inside this context is
     atomic -- at most one concurrent writer can succeed.
 
-    The explicit ROLLBACK on exception is wrapped in try/except so that
-    a SQLite auto-rollback (which leaves no active transaction) does not
-    shadow the original exception with a spurious rollback error.
+    Nested calls use a savepoint so helpers can compose one atomic write
+    without committing or exposing partial state from the outer transaction.
+    The rollback handlers must not shadow the original exception.
     """
+    if conn.in_transaction:
+        savepoint = f"hermes_nested_{secrets.token_hex(8)}"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            yield conn
+        except BaseException:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except sqlite3.OperationalError:
+                pass
+            raise
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return
+
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
         yield conn
-    except Exception:
+    except BaseException:
         try:
             conn.execute("ROLLBACK")
         except sqlite3.OperationalError:

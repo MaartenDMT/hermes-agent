@@ -4464,6 +4464,61 @@ def test_write_txn_healthy_commit_no_exception(tmp_path):
     conn.close()
 
 
+def test_nested_write_txn_stays_invisible_and_rolls_back_with_outer_transaction(tmp_path):
+    db = tmp_path / "nested.db"
+    writer = kb.connect(db_path=db)
+    observer = kb.connect(db_path=db)
+
+    with pytest.raises(RuntimeError, match="abort outer transaction"):
+        with kb.write_txn(writer):
+            task_id = kb.create_task(writer, title="Nested task")
+            assert kb.get_task(observer, task_id) is None
+            raise RuntimeError("abort outer transaction")
+
+    assert kb.get_task(observer, task_id) is None
+    writer.close()
+    observer.close()
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, KeyboardInterrupt])
+def test_nested_write_txn_rolls_back_inner_failure_when_outer_continues(tmp_path, failure_type):
+    db = tmp_path / "nested-inner.db"
+    conn = kb.connect(db_path=db)
+
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, created_at) VALUES ('t_outer', 'Outer', 'todo', 1)"
+        )
+        try:
+            with kb.write_txn(conn):
+                conn.execute(
+                    "INSERT INTO tasks (id, title, status, created_at) VALUES ('t_inner', 'Inner', 'todo', 1)"
+                )
+                raise failure_type("abort inner transaction")
+        except failure_type:
+            pass
+
+    assert conn.execute("SELECT id FROM tasks WHERE id = 't_outer'").fetchone() is not None
+    assert conn.execute("SELECT id FROM tasks WHERE id = 't_inner'").fetchone() is None
+    conn.close()
+
+
+def test_write_txn_rolls_back_keyboard_interrupt(tmp_path):
+    db = tmp_path / "outer-interrupt.db"
+    conn = kb.connect(db_path=db)
+
+    with pytest.raises(KeyboardInterrupt, match="abort outer transaction"):
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO tasks (id, title, status, created_at) VALUES ('t_interrupt', 'Interrupt', 'todo', 1)"
+            )
+            raise KeyboardInterrupt("abort outer transaction")
+
+    assert conn.in_transaction is False
+    assert conn.execute("SELECT id FROM tasks WHERE id = 't_interrupt'").fetchone() is None
+    conn.close()
+
+
 def test_write_txn_raises_on_truncated_file(tmp_path):
     """A mocked smaller file size triggers the torn-extend check."""
     from hermes_cli.kanban_db import connect, write_txn

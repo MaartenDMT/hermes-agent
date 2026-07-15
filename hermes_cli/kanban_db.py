@@ -3613,7 +3613,7 @@ def release_unstarted_claim(
             (task_id,),
         ).fetchone()
         run_row = conn.execute(
-            "SELECT claim_lock, worker_pid, ended_at, metadata "
+            "SELECT status, claim_lock, worker_pid, ended_at, metadata "
             "FROM task_runs WHERE id = ? AND task_id = ?",
             (run_id, task_id),
         ).fetchone()
@@ -3622,6 +3622,7 @@ def release_unstarted_claim(
             or run_row is None
             or task_row["status"] != "running"
             or task_row["current_run_id"] != run_id
+            or run_row["status"] != "running"
             or task_row["claim_lock"] != claimer
             or run_row["claim_lock"] != claimer
             or task_row["worker_pid"] is not None

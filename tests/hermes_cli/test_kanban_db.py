@@ -4931,6 +4931,38 @@ def test_release_unstarted_claim_is_neutral_and_strictly_guarded(kanban_home):
     assert run.metadata["release_reason"] == "route changed"
 
 
+def test_release_unstarted_claim_refuses_non_running_run(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="review", assignee="reviewer")
+        expected = kb.task_launch_revision(conn, task_id)
+        claimed = kb.claim_task(
+            conn,
+            task_id,
+            claimer="host:dispatcher",
+            expected_revision=expected,
+            launch_fingerprint="launch-v1",
+        )
+        conn.execute(
+            "UPDATE task_runs SET status = 'blocked' WHERE id = ?",
+            (claimed.current_run_id,),
+        )
+
+        released = kb.release_unstarted_claim(
+            conn,
+            task_id,
+            run_id=claimed.current_run_id,
+            claimer="host:dispatcher",
+            reason="must not overwrite",
+        )
+        task = kb.get_task(conn, task_id)
+        run = kb.latest_run(conn, task_id)
+
+    assert released is False
+    assert task.status == "running"
+    assert run.status == "blocked"
+    assert run.ended_at is None
+
+
 def test_release_unstarted_claim_refuses_spawned_worker(kanban_home):
     with kb.connect() as conn:
         task_id = kb.create_task(conn, title="review", assignee="reviewer")

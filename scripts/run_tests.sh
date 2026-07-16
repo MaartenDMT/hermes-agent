@@ -42,15 +42,22 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # (HERMES_PYTHON is exported by the devShell hook and ships [dev] extras:
 # pytest, pytest-asyncio, pytest-timeout, ruff, ty).
 VENV=""
+PYTHON=""
 for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
   if [ -f "$candidate/bin/activate" ]; then
     VENV="$candidate"
+    PYTHON="$candidate/bin/python"
+    break
+  fi
+  if [ -f "$candidate/Scripts/python.exe" ]; then
+    VENV="$candidate"
+    PYTHON="$candidate/Scripts/python.exe"
     break
   fi
 done
 
 if [ -n "$VENV" ]; then
-  PYTHON="$VENV/bin/python"
+  : # PYTHON was set in the probe loop (bin/ on POSIX, Scripts/ on Windows)
 elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
     && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
   # Guard with an import check: HERMES_PYTHON may point at the RELEASE
@@ -94,9 +101,20 @@ echo "▶ launching test runner"
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
+  ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+  ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
+  ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
+  ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
+  ${APPDATA:+APPDATA="$APPDATA"} \
+  ${SYSTEMDRIVE:+SYSTEMDRIVE="$SYSTEMDRIVE"} \
+  ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+  ${TEMP:+TEMP="$TEMP"} \
+  ${TMP:+TMP="$TMP"} \
   TZ=UTC \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
+  PYTHONUTF8=1 \
+  PYTHONIOENCODING=UTF-8 \
   PYTHONHASHSEED=0 \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \

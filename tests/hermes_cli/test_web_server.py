@@ -2083,6 +2083,21 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["lines"] == ["tail-one", "tail-two"]
 
+    def test_completed_action_rotates_oversized_log_before_append(self, tmp_path, monkeypatch):
+        import hermes_cli.kanban_db as kanban_db
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_ACTION_LOG_DIR", tmp_path)
+        monkeypatch.setattr(kanban_db, "DEFAULT_LOG_ROTATE_BYTES", 8)
+        log_path = tmp_path / web_server._ACTION_LOG_FILES["doctor"]
+        log_path.write_bytes(b"old-content")
+
+        web_server._record_completed_action("doctor", "new-content", exit_code=0)
+
+        assert log_path.with_suffix(".log.1").read_bytes() == b"old-content"
+        assert b"new-content" in log_path.read_bytes()
+        assert b"old-content" not in log_path.read_bytes()
+
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config

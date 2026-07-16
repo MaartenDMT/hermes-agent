@@ -3237,11 +3237,27 @@ _ACTION_COMMANDS: Dict[str, Tuple[str, ...]] = {}
 _ACTION_RESULTS: Dict[str, Dict[str, Any]] = {}
 
 
+def _rotate_action_log(log_path: Path) -> None:
+    """Rotate dashboard action logs with the kanban worker-log policy."""
+    from hermes_cli.kanban_db import (
+        DEFAULT_LOG_BACKUP_COUNT,
+        DEFAULT_LOG_ROTATE_BYTES,
+        _rotate_worker_log,
+    )
+
+    _rotate_worker_log(
+        log_path,
+        DEFAULT_LOG_ROTATE_BYTES,
+        DEFAULT_LOG_BACKUP_COUNT,
+    )
+
+
 def _record_completed_action(name: str, message: str, exit_code: int = 1) -> None:
     """Record a non-spawned action result and write it to the action log."""
     log_file_name = _ACTION_LOG_FILES[name]
     _ACTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = _ACTION_LOG_DIR / log_file_name
+    _rotate_action_log(log_path)
     with open(log_path, "ab", buffering=0) as log_file:
         log_file.write(
             f"\n=== {name} completed {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
@@ -3275,6 +3291,7 @@ def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
     log_file_name = _ACTION_LOG_FILES[name]
     _ACTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = _ACTION_LOG_DIR / log_file_name
+    _rotate_action_log(log_path)
     log_file = open(log_path, "ab", buffering=0)
     log_file.write(
         f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
@@ -14600,7 +14617,7 @@ async def _legacy_pump(ws: "WebSocket", bridge) -> None:
                 if chunk is None:  # EOF
                     return
                 if not chunk:  # no data this tick; yield control and retry
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(min(_PTY_READ_CHUNK_TIMEOUT, 0.02))
                     continue
                 try:
                     await ws.send_bytes(chunk)

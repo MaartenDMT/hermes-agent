@@ -1,5 +1,6 @@
 import asyncio
 import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -113,6 +114,41 @@ async def test_eof_marks_dead_and_closes_socket_4410():
     assert s.alive is False
     assert ws.close_code == 4410
     await s.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_read_uses_bounded_idle_delay():
+    from hermes_cli.pty_session import PtySession
+
+    bridge = FakeBridge([b"", None])
+    session = PtySession("k", bridge, buffer_cap=1024, read_timeout=0.5)
+
+    with patch("hermes_cli.pty_session.asyncio.sleep", new_callable=AsyncMock) as sleep_mock:
+        await session._drain()
+
+    sleep_mock.assert_awaited_once_with(0.02)
+
+
+@pytest.mark.asyncio
+async def test_legacy_pump_empty_read_uses_bounded_idle_delay():
+    import hermes_cli.web_server as web_server
+
+    bridge = FakeBridge([b"", None])
+    closed = asyncio.Event()
+
+    class _LegacyWS(FakeWS):
+        async def receive(self):
+            await closed.wait()
+            raise RuntimeError("closed")
+
+        async def close(self, code=1000, reason=""):
+            await super().close(code=code, reason=reason)
+            closed.set()
+
+    with patch("hermes_cli.web_server.asyncio.sleep", new_callable=AsyncMock) as sleep_mock:
+        await web_server._legacy_pump(_LegacyWS(), bridge)
+
+    sleep_mock.assert_awaited_once_with(0.02)
 
 
 from hermes_cli.pty_session import PtySessionRegistry, RegistryFull

@@ -68,7 +68,7 @@ class PtySession:
                         pass
                 return
             if not chunk:                            # idle tick
-                await asyncio.sleep(min(self._read_timeout, 0.02))
+                await asyncio.sleep(0)
                 continue
             self.buffer.append(chunk)
             ws = self._ws

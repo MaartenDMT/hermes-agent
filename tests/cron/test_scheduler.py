@@ -413,6 +413,22 @@ class TestResolveDeliveryTarget:
             "thread_id": None,
         }
 
+    def test_explicit_discord_parent_target_preserves_matching_origin_thread_id(self):
+        job = {
+            "deliver": "discord:1521949480880967810",
+            "origin": {
+                "platform": "discord",
+                "chat_id": "1521949480880967810",
+                "thread_id": "1526835363946037249",
+            },
+        }
+
+        assert _resolve_delivery_target(job) == {
+            "platform": "discord",
+            "chat_id": "1521949480880967810",
+            "thread_id": "1526835363946037249",
+        }
+
     def test_explicit_discord_channel_without_thread(self):
         """deliver: 'discord:1001234567890' resolves via explicit platform:chat_id path."""
         job = {

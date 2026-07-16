@@ -1152,6 +1152,15 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
         except Exception:
             pass
 
+        if (
+            platform_key == "discord"
+            and thread_id is None
+            and origin
+            and origin["platform"].lower() == platform_key
+            and str(origin["chat_id"]) == str(chat_id)
+        ):
+            thread_id = origin.get("thread_id")
+
         return {
             "platform": platform_name,
             "chat_id": chat_id,

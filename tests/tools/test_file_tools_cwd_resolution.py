@@ -453,9 +453,95 @@ def test_sessions_cd_updates_only_its_own_resolution(_two_worktree_sessions, tmp
 def test_unregistered_session_never_inherits_another_sessions_record(
     _two_worktree_sessions, monkeypatch
 ):
-    """Session C: no record, no override. Must NOT inherit A's or B's cwd."""
-    wt_a, wt_b, main = _two_worktree_sessions
-    resolved = ft._resolve_path_for_task("target.py", task_id="sess-c")
-    assert not str(resolved).startswith(str(wt_a))
-    assert not str(resolved).startswith(str(wt_b))
-    assert resolved == (main / "target.py").resolve()
+    """#26211 belt-and-suspenders must not break worktree isolation.
+
+    The owner (session B) doing an owned live read mirrors wt_b into the shared
+    _last_known_cwd['default'] registry. Session A — which does NOT own the env
+    but HAS its own registered worktree (wt_a) — must still resolve into wt_a,
+    not inherit B's preserved cwd through the shared-container key. The
+    session-specific registered override must beat the durable shared anchor.
+    """
+    wt_a, wt_b, _main = _two_worktree_sessions
+    monkeypatch.setattr(ft, "_last_known_cwd", {})
+
+    # Owner B resolves first — this mirrors wt_b into _last_known_cwd['default'].
+    assert ft._resolve_path_for_task("target.py", task_id="sess-b") == (wt_b / "target.py")
+    assert ft._last_known_cwd.get("default") == str(wt_b)
+
+    # A still routes to its own registered worktree despite the shared anchor.
+    resolved_a = ft._resolve_path_for_task("target.py", task_id="sess-a")
+    assert resolved_a == (wt_a / "target.py")
+    assert not str(resolved_a).startswith(str(wt_b))
+
+
+# ── Cross-runtime mount-alias translation (July 2026) ────────────────────────
+# The Docker sandbox bind-mounts host dirs under /mnt. Agents hand the "other"
+# runtime's spelling to the file tools:
+#   * host runtime given "/mnt/programming/x" drive-anchored to C:\mnt\...;
+#   * container runtime given "C:\Programming\x" joined onto the container cwd
+#     as a single literal-backslash filename.
+# Known aliases translate; unknown absolutes keep the legacy behavior.
+
+
+@pytest.fixture
+def _docker_env(monkeypatch):
+    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "docker"})
+    monkeypatch.setattr(terminal_tool, "_active_environments", {})
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-host translation")
+def test_host_translates_known_container_mount_alias(tmp_path, monkeypatch):
+    """POSIX /mnt alias on the Windows host maps to the real host directory."""
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": str(tmp_path))
+
+    resolved = ft._resolve_path_for_task("/mnt/programming/agent-wiki/index.md")
+
+    assert resolved == Path("C:/Programming/agent-wiki/index.md").resolve()
+    assert "mnt" not in resolved.parts
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-host legacy anchoring")
+def test_host_unknown_posix_absolute_keeps_legacy_drive_anchor(tmp_path, monkeypatch):
+    """Unknown POSIX-absolute input keeps the historical drive-anchor join."""
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": str(tmp_path))
+
+    resolved = ft._resolve_path_for_task("/opt/unknown/thing.txt")
+
+    assert resolved == (tmp_path / Path("/opt/unknown/thing.txt")).resolve()
+
+
+def test_container_translates_known_host_alias_to_mount(_docker_env):
+    """Windows-absolute input under a known bind mount becomes its /mnt form."""
+    for given in (r"C:\Programming\agent-wiki\index.md",
+                  "C:/Programming/agent-wiki/index.md",
+                  r"c:\programming\agent-wiki\index.md"):
+        resolved = ft._resolve_path_for_task(given)
+        assert resolved == PurePosixPath("/mnt/programming/agent-wiki/index.md"), given
+
+
+def test_container_translates_alias_with_spaces(_docker_env):
+    resolved = ft._resolve_path_for_task(
+        r"C:\Users\Maart\Documents\Obsidian Vaults\vault\note.md"
+    )
+
+    assert resolved == PurePosixPath("/mnt/obsidian-vaults/vault/note.md")
+
+
+def test_container_unknown_windows_absolute_stays_host_path(_docker_env, monkeypatch):
+    """Unknown Windows-absolute input must NOT be joined onto the container cwd
+    (that wrote literal-backslash filenames). It stays a host-side path."""
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": "/workspace")
+
+    given = r"C:\Somewhere\else\file.txt"
+    resolved = ft._resolve_path_for_task(given)
+
+    assert str(resolved) == os.path.normpath(given)
+    assert not str(resolved).startswith("/workspace")
+    assert not isinstance(resolved, PurePosixPath)
+
+
+def test_container_posix_absolute_unchanged(_docker_env):
+    """Genuine container paths keep their existing behavior."""
+    resolved = ft._resolve_path_for_task("/workspace/projects/foo.txt")
+
+    assert resolved == PurePosixPath("/workspace/projects/foo.txt")

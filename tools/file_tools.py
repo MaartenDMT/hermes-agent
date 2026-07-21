@@ -222,6 +222,56 @@ def _normalize_without_host_deref(path: str | Path | PurePosixPath) -> PurePosix
     return PurePosixPath(posixpath.normpath(str(path)))
 
 
+# ---------------------------------------------------------------------------
+# Cross-runtime mount aliases (Windows host <-> Linux container sandbox).
+#
+# The Docker sandbox bind-mounts these host directories under /mnt.  Agents
+# routinely hand the "other" runtime's spelling to the file tools:
+#   * host runtime given "/mnt/programming/x" -> Path.is_absolute() is False on
+#     Windows, so it was drive-anchored to C:\mnt\programming\x (missing file);
+#   * container runtime given "C:\Programming\x" -> posixpath.isabs() is False,
+#     so it was joined onto the container cwd and written as a single
+#     literal-backslash filename.
+# Translate across the boundary instead of mangling. (host paths use forward
+# slashes here; comparisons are case-insensitive and separator-insensitive.)
+# ---------------------------------------------------------------------------
+_MOUNT_ALIASES: tuple[tuple[str, str], ...] = (
+    ("/mnt/programming", "C:/Programming"),
+    ("/mnt/ai-assets", "A:/AI"),
+    ("/mnt/obsidian-vaults", "C:/Users/Maart/Documents/Obsidian Vaults"),
+)
+
+
+def _is_windows_drive_abs(path: str) -> bool:
+    """True for drive-absolute Windows paths like ``C:/x`` or ``C:\\x``."""
+    return (
+        len(path) >= 3
+        and path[0].isalpha()
+        and path[1] == ":"
+        and path[2] in ("/", "\\")
+    )
+
+
+def _translate_mount_to_host(path: str) -> str | None:
+    """Map a POSIX container-mount path to its host equivalent, else None."""
+    posix = posixpath.normpath(path.replace("\\", "/"))
+    for mount, host in _MOUNT_ALIASES:
+        if posix == mount or posix.startswith(mount + "/"):
+            return host + posix[len(mount):]
+    return None
+
+
+def _translate_host_to_mount(path: str) -> str | None:
+    """Map a host path under a known bind mount to its /mnt form, else None."""
+    win = path.replace("\\", "/")
+    lowered = win.lower()
+    for mount, host in _MOUNT_ALIASES:
+        host_l = host.lower()
+        if lowered == host_l or lowered.startswith(host_l + "/"):
+            return mount + win[len(host):]
+    return None
+
+
 def _sentinel_free_abs_cwd(raw: str | None) -> str | None:
     """Normalize a cwd candidate to an absolute, sentinel-free anchor.
 
@@ -376,6 +426,15 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | Pu
         expanded = _expand_tilde(filepath)
         if posixpath.isabs(expanded):
             return _normalize_without_host_deref(expanded)
+        if _is_windows_drive_abs(expanded):
+            translated = _translate_host_to_mount(expanded)
+            if translated:
+                return _normalize_without_host_deref(translated)
+            # Windows-absolute path outside the known bind mounts: treat it as
+            # a host path, normalized WITHOUT following host symlinks. Joining
+            # it onto the container cwd would produce a single
+            # literal-backslash filename in the container.
+            return Path(os.path.normpath(expanded))
         resolved = _resolve_base_dir(task_id, container_paths=True) / expanded
         return _normalize_without_host_deref(resolved)
 
@@ -394,6 +453,12 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | Pu
     p = Path(expanded)
     if p.is_absolute():
         return p.resolve()
+    if os.name == "nt" and expanded[:1] in ("/", "\\"):
+        translated = _translate_mount_to_host(expanded)
+        if translated:
+            return Path(translated).resolve()
+        # Unknown POSIX-absolute path on a Windows host: keep the legacy
+        # drive-anchoring join below (backward compatible).
     resolved = _resolve_base_dir(task_id, container_paths=False) / p
     return resolved.resolve()
 

@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 from urllib.parse import quote, unquote
 
+from hermes_cli._subprocess_compat import windows_hide_flags
 from agent.lsp.protocol import (
     ERROR_CONTENT_MODIFIED,
     ERROR_METHOD_NOT_FOUND,
@@ -259,8 +260,16 @@ class LSPClient:
             env.update(self._env)
 
         cmd = self._command
+        _win_kwargs: Dict[str, Any] = {}
         if sys.platform == "win32":
             cmd = self._win_wrap_cmd(cmd)
+            # The gateway runs headless (pythonw.exe → no console of its own),
+            # so a console-subsystem server (pwsh for PSES, cmd.exe for .cmd
+            # shims) is handed its own *visible* console window. Windows
+            # ignores start_new_session (POSIX-only), so CREATE_NO_WINDOW has
+            # to be passed explicitly — same contract as every subprocess.Popen
+            # call site in this repo.
+            _win_kwargs["creationflags"] = windows_hide_flags()
 
         try:
             # start_new_session=True detaches the LSP server into its own
@@ -279,6 +288,7 @@ class LSPClient:
                 env=env,
                 cwd=self._cwd,
                 start_new_session=True,
+                **_win_kwargs,
             )
         except FileNotFoundError as e:
             raise LSPProtocolError(

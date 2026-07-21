@@ -6041,10 +6041,15 @@ class TelegramAdapter(BasePlatformAdapter):
         cmd = [str(script_path), arg, *extra_args]
         success = False
         try:
+            # Headless gateway (pythonw.exe) => console children get a visible
+            # window unless CREATE_NO_WINDOW is passed explicitly.
+            from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+            _win = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **_win,
             )
             _stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=60,

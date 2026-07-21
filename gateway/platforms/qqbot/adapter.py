@@ -2112,6 +2112,11 @@ class QQAdapter(BasePlatformAdapter):
     async def _convert_ffmpeg_to_wav(self, src_path: str, wav_path: str) -> Optional[str]:
         """Convert audio file to WAV using ffmpeg."""
         try:
+            # Headless gateway (pythonw.exe) => console children get a visible
+            # window unless CREATE_NO_WINDOW is passed explicitly.
+            import sys
+            from hermes_cli._subprocess_compat import windows_hide_flags
+            _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-y",
@@ -2124,6 +2129,7 @@ class QQAdapter(BasePlatformAdapter):
                 wav_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+                **_win,
             )
             await asyncio.wait_for(proc.wait(), timeout=30)
             if proc.returncode != 0:

@@ -2154,10 +2154,15 @@ async def _probe_audio_duration(path: str) -> Optional[str]:
             pass
 
     try:
+        # Headless gateway (pythonw.exe) => console children get a visible
+        # window unless CREATE_NO_WINDOW is passed explicitly.
+        from hermes_cli._subprocess_compat import windows_hide_flags
+        _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", path,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **_win,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
         if proc.returncode == 0:
@@ -10194,12 +10199,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             # quick commands run in the gateway process which
                             # has all API keys in os.environ.
                             from tools.environments.local import _sanitize_subprocess_env
+                            from hermes_cli._subprocess_compat import windows_hide_flags
                             sanitized_env = _sanitize_subprocess_env(os.environ.copy())
+                            # Headless gateway => cmd.exe would get a visible
+                            # console window without CREATE_NO_WINDOW.
+                            _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
                             proc = await asyncio.create_subprocess_shell(
                                 exec_cmd,
                                 stdout=asyncio.subprocess.PIPE,
                                 stderr=asyncio.subprocess.PIPE,
                                 env=sanitized_env,
+                                **_win,
                             )
                             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
                             output = (stdout or stderr).decode().strip()

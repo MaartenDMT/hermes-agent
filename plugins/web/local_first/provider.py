@@ -286,11 +286,16 @@ async def _run_bounded_subprocess(
     timeout_secs: int,
     max_output_chars: int,
 ) -> str:
+    # Headless gateway (pythonw.exe) => console children get a visible window
+    # unless CREATE_NO_WINDOW is passed explicitly.
+    from hermes_cli._subprocess_compat import windows_hide_flags
+    _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
     process = await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **_win,
     )
 
     async def _read_limited(stream: asyncio.StreamReader, label: str) -> str:

@@ -1246,12 +1246,18 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
 
         out_path = mp3_path.rsplit(".", 1)[0] + ".ogg"
         try:
+            # Headless gateway (pythonw.exe) => console children get a visible
+            # window unless CREATE_NO_WINDOW is passed explicitly.
+            import sys
+            from hermes_cli._subprocess_compat import windows_hide_flags
+            _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
             proc = await asyncio.create_subprocess_exec(
                 _FFMPEG_PATH, "-y", "-i", mp3_path,
                 "-c:a", "libopus", "-b:a", "32k", "-vbr", "on",
                 "-application", "voip", out_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+                **_win,
             )
             _, stderr = await proc.communicate()
             if proc.returncode != 0 or not Path(out_path).exists():

@@ -495,6 +495,10 @@ class TeamsMeetingPipeline:
                 "Recording fallback requires ffmpeg for audio extraction, but ffmpeg was not found."
             )
         audio_path = recording_path.with_suffix(".wav")
+        # Headless gateway (pythonw.exe) => console children get a visible
+        # window unless CREATE_NO_WINDOW is passed explicitly.
+        from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+        _win = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
         proc = await asyncio.create_subprocess_exec(
             ffmpeg,
             "-y",
@@ -503,6 +507,7 @@ class TeamsMeetingPipeline:
             str(audio_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_win,
         )
         _stdout, stderr = await proc.communicate()
         if proc.returncode != 0:

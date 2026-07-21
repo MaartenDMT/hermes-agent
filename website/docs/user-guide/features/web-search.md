@@ -26,7 +26,7 @@ Both are configured through a single backend selection. Providers are chosen via
 | **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
 | **Exa** | `EXA_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | Paid |
-| **xAI (Grok)** | `XAI_API_KEY` or `hermes auth login xai-oauth` | ✔ | — | Paid (SuperGrok or per-token) |
+| **xAI (Grok)** | `XAI_API_KEY` or `hermes auth add xai-oauth` | ✔ | — | Paid (SuperGrok or per-token) |
 
 Brave Search, DDGS, and xAI are **search-only**.
 Pair any of them with `local_first` for free local extraction, or with Firecrawl/Tavily/Exa/Parallel when you explicitly want a hosted extractor.
@@ -355,7 +355,7 @@ XAI_API_KEY=sk-xai-your-key-here
 or for SuperGrok subscribers:
 
 ```bash
-hermes auth login xai-oauth
+hermes auth add xai-oauth
 ```
 
 Then select xAI as the search backend:

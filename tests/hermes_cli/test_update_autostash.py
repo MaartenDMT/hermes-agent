@@ -387,6 +387,7 @@ def _setup_update_mocks(monkeypatch, tmp_path):
     """Common setup for cmd_update tests."""
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(hermes_main, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(hermes_main, "_is_windows", lambda: False)
     monkeypatch.setattr(hermes_main, "_stash_local_changes_if_needed", lambda *a, **kw: None)
     monkeypatch.setattr(hermes_main, "_restore_stashed_changes", lambda *a, **kw: True)
     monkeypatch.setattr(hermes_config, "get_missing_env_vars", lambda required_only=True: [])
@@ -407,6 +408,8 @@ def test_cmd_update_retries_optional_extras_individually_when_all_fails(monkeypa
 
     def fake_run(cmd, **kwargs):
         recorded.append(cmd)
+        if cmd[:3] == ["git", "-c", "windows.appendAtomically=false"]:
+            cmd = ["git", *cmd[3:]]
         if cmd == ["git", "fetch", "origin", "main"]:
             return SimpleNamespace(stdout="", stderr="", returncode=0)
         if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
@@ -456,6 +459,8 @@ def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kwargs):
         recorded.append(cmd)
+        if cmd[:3] == ["git", "-c", "windows.appendAtomically=false"]:
+            cmd = ["git", *cmd[3:]]
         if cmd == ["git", "fetch", "origin", "main"]:
             return SimpleNamespace(stdout="", stderr="", returncode=0)
         if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
@@ -477,6 +482,7 @@ def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
 
 def test_install_with_optional_fallback_honors_custom_group(monkeypatch):
     """Termux update path should target .[termux-all] when requested."""
+    monkeypatch.setattr(hermes_main, "_is_windows", lambda: False)
     calls = []
     monkeypatch.setattr(
         hermes_main,
@@ -605,6 +611,16 @@ def test_cmd_update_restores_original_branch_when_local_commit_abort(
     _setup_update_mocks(monkeypatch, tmp_path)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
 
+    monkeypatch.setattr(
+        hermes_main, "_stash_local_changes_if_needed", lambda *a, **kw: "stash-ref"
+    )
+    restore_calls = []
+    monkeypatch.setattr(
+        hermes_main,
+        "_restore_stashed_changes",
+        lambda *a, **kw: restore_calls.append(kw) or True,
+    )
+
     side_effect, recorded = _make_update_side_effect(
         current_branch="fix/something",
         ff_only_fails=True,
@@ -615,12 +631,14 @@ def test_cmd_update_restores_original_branch_when_local_commit_abort(
     with pytest.raises(SystemExit, match="1"):
         hermes_main.cmd_update(SimpleNamespace())
 
-    checkout_main_calls = [c for c in recorded if c == ["git", "checkout", "main"]]
+    checkout_main_calls = [c for c in recorded if "checkout" in c and "main" in c]
     checkout_back_calls = [
-        c for c in recorded if c == ["git", "checkout", "fix/something"]
+        c for c in recorded if "checkout" in c and "fix/something" in c
     ]
     assert len(checkout_main_calls) == 1
     assert len(checkout_back_calls) == 1
+    assert len(restore_calls) == 1
+    assert restore_calls[0]["prompt_user"] is False
 
     out = capsys.readouterr().out
     assert "Restored branch 'fix/something'." in out
@@ -762,7 +780,8 @@ def test_cmd_update_fetch_is_scoped_to_target_branch(monkeypatch, tmp_path):
     hermes_main.cmd_update(SimpleNamespace())
 
     fetch_calls = [c for c in recorded if "fetch" in c]
-    assert fetch_calls == [["git", "fetch", "origin", "main"]]
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0][-3:] == ["fetch", "origin", "main"]
     assert ["git", "fetch", "origin"] not in recorded
 
 

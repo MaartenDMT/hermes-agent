@@ -503,6 +503,11 @@ class CopilotACPClient:
 
     def _run_prompt(self, prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
         try:
+            import sys
+            # Headless gateway (pythonw.exe) => console children get a
+            # visible window unless CREATE_NO_WINDOW is passed explicitly.
+            from hermes_cli._subprocess_compat import windows_hide_flags
+            _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args,
                 stdin=subprocess.PIPE,
@@ -512,6 +517,7 @@ class CopilotACPClient:
                 bufsize=1,
                 cwd=self._acp_cwd,
                 env=_build_subprocess_env(),
+                **_win,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(

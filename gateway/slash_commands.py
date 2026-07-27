@@ -4889,7 +4889,11 @@ class GatewaySlashCommandsMixin:
                     env = dict(os.environ)
                     env["PYTHONUNBUFFERED"] = "1"
                     with open(output_path, "wb") as f:
-                        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env)
+                        # This helper only ever runs on Windows and its child's
+                        # output goes to f, so CREATE_NO_WINDOW keeps the
+                        # console `hermes` shim from popping a terminal.
+                        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env,
+                                                creationflags=subprocess.CREATE_NO_WINDOW)
                         rc = proc.wait(timeout=3600)
                     with open(exit_code_path, "w") as f:
                         f.write(str(rc))

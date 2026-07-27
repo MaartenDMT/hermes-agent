@@ -1096,7 +1096,14 @@ def play_audio_file(file_path: str) -> bool:
         exe = shutil.which(cmd[0])
         if exe:
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+                # Headless gateway (pythonw.exe) => console children get a
+                # visible window unless CREATE_NO_WINDOW is passed explicitly.
+                from hermes_cli._subprocess_compat import windows_hide_flags
+                _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                    **_win,
+                )
                 with _playback_lock:
                     _active_playback = proc
                 proc.wait(timeout=300)

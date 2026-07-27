@@ -612,9 +612,14 @@ def _ensure_ollama(models: list[str]) -> bool:
         if ollama_bin:
             print("  Ollama installed but not running. Starting...")
             try:
+                # Headless gateway (pythonw.exe) => console children get a
+                # visible window unless CREATE_NO_WINDOW is passed explicitly.
+                from hermes_cli._subprocess_compat import windows_hide_flags
+                _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
                 subprocess.Popen(
                     [ollama_bin, "serve"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    **_win,
                 )
                 _wait_for_port("localhost", 11434, timeout=10)
                 ok, _ = _check_ollama(url)

@@ -1167,12 +1167,18 @@ def _start_local_openviking_server(endpoint: str) -> tuple[bool, str]:
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("ab") as log_file:
+            import sys
+            # Headless gateway (pythonw.exe) => console children get a
+            # visible window unless CREATE_NO_WINDOW is passed explicitly.
+            from hermes_cli._subprocess_compat import windows_hide_flags
+            _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
             subprocess.Popen(
                 [server_cmd, "--host", host, "--port", str(port)],
                 stdout=log_file,
                 stderr=log_file,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
+                **_win,
             )
     except Exception as e:
         return False, f"Could not start openviking-server: {e}"

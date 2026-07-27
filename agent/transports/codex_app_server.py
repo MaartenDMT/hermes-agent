@@ -127,6 +127,11 @@ class CodexAppServerClient:
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 
+        import sys
+        # Headless gateway (pythonw.exe) => console children get a visible
+        # window unless CREATE_NO_WINDOW is passed explicitly.
+        from hermes_cli._subprocess_compat import windows_hide_flags
+        _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -134,6 +139,7 @@ class CodexAppServerClient:
             stderr=subprocess.PIPE,
             bufsize=0,
             env=spawn_env,
+            **_win,
         )
         self._next_id = 1
         self._pending: dict[int, _Pending] = {}

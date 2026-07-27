@@ -252,16 +252,23 @@ class SSHEnvironment(BaseEnvironment):
             # dirs which breaks sshd StrictModes (refuses authorized_keys).
             ssh_cmd.append(f"tar xf - --no-overwrite-dir -C {shlex.quote(base)}")
 
+            import sys
+            # Headless gateway (pythonw.exe) => console children get a
+            # visible window unless CREATE_NO_WINDOW is passed explicitly.
+            from hermes_cli._subprocess_compat import windows_hide_flags
+            _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
             tar_proc = subprocess.Popen(
                 tar_cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **_win,
             )
             try:
                 ssh_proc = subprocess.Popen(
                     ssh_cmd, stdin=tar_proc.stdout, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    **_win,
                 )
             except Exception:
                 tar_proc.kill()

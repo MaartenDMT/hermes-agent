@@ -318,6 +318,10 @@ class HostSupervisor:
         env.setdefault("PYTHONPATH", str(_repo_root()))
         if str(_repo_root()) not in env["PYTHONPATH"].split(os.pathsep):
             env["PYTHONPATH"] = str(_repo_root()) + os.pathsep + env["PYTHONPATH"]
+        # Headless gateway (pythonw.exe) => console children get a visible
+        # window unless CREATE_NO_WINDOW is passed explicitly.
+        from hermes_cli._subprocess_compat import windows_hide_flags
+        _win = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
         proc = subprocess.Popen(
             self.argv,
             cwd=str(self.cwd),
@@ -328,6 +332,7 @@ class HostSupervisor:
             text=True,
             bufsize=1,
             start_new_session=True,
+            **_win,
         )
         self._proc = proc
         self._stdout_thread = _Thread(target=self._drain_stdout, args=(proc,), name="compute-host-stdout", daemon=True)

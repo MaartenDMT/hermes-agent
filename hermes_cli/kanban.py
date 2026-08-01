@@ -404,6 +404,13 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                         help="Include archived tasks")
     p_list.add_argument("--json", action="store_true")
     p_list.add_argument(
+        "--limit",
+        type=int,
+        choices=range(1, 201),
+        metavar="N",
+        help="Return at most N tasks (1-200)",
+    )
+    p_list.add_argument(
         "--sort",
         default=None,
         choices=sorted(kb.VALID_SORT_ORDERS.keys()),
@@ -1463,6 +1470,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             tenant=args.tenant,
             session_id=args.session,
             include_archived=args.archived,
+            limit=args.limit,
             order_by=getattr(args, "sort", None),
             workflow_template_id=args.workflow_template_id,
             current_step_key=args.current_step_key,

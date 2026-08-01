@@ -236,6 +236,21 @@ def test_kanban_list_json_includes_session_id(kanban_home):
     )
 
 
+def test_kanban_list_limit_bounds_json_without_changing_shape(kanban_home):
+    for index in range(3):
+        kc.run_slash(f"create 'bounded task {index}'")
+
+    payload = json.loads(kc.run_slash("list --json --limit 2"))
+
+    assert isinstance(payload, list)
+    assert len(payload) == 2
+
+
+def test_kanban_list_rejects_limit_outside_supported_range(kanban_home):
+    out = kc.run_slash("list --limit 201")
+    assert "invalid choice" in out.lower()
+
+
 def test_run_slash_usage_error_returns_message(kanban_home):
     # Missing required argument for create
     out = kc.run_slash("create")

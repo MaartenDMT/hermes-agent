@@ -101,6 +101,7 @@ _log = logging.getLogger(__name__)
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_AUTONOMY = frozenset({"A1", "A2", "A3"})
 
 # Typed block reasons. Distinguishes the two fundamentally different things a
 # worker (or human) means by "blocked", so each can be routed differently
@@ -915,6 +916,9 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    # Display-only operating authority. It deliberately does not affect launch,
+    # toolsets, routing, model selection, or approvals.
+    autonomy: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -999,6 +1003,7 @@ class Task:
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
             ),
+            autonomy=row["autonomy"] if "autonomy" in keys else None,
         )
 
 
@@ -1101,6 +1106,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     assignee             TEXT,
     status               TEXT NOT NULL,
     priority             INTEGER DEFAULT 0,
+    autonomy             TEXT,
     created_by           TEXT,
     created_at           INTEGER NOT NULL,
     started_at           INTEGER,
@@ -2296,6 +2302,11 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "goal_max_turns", "goal_max_turns INTEGER"
         )
 
+    if "autonomy" not in cols:
+        # Display-only A1/A2/A3 classification. NULL preserves legacy rows and
+        # has no dispatcher semantics.
+        _add_column_if_missing(conn, "tasks", "autonomy", "autonomy TEXT")
+
     if "session_id" not in cols:
         # Originating agent/chat session id, populated when the task is
         # created from within an agent loop that propagated
@@ -3122,6 +3133,137 @@ def list_tasks(
         query += f" LIMIT {int(limit)}"
     rows = conn.execute(query, params).fetchall()
     return [Task.from_row(r) for r in rows]
+
+
+EDITABLE_TASK_FIELDS = frozenset({"title", "priority", "assignee", "autonomy", "parent_ids"})
+
+
+def update_task_fields(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    expected_state: str,
+    fields: dict[str, Any],
+    allowed_assignees: Optional[Iterable[str]] = None,
+) -> Optional[Task]:
+    """Atomically update Mission Control's safe task fields.
+
+    Returns a freshly-read task, or ``None`` when ``expected_state`` no longer
+    matches. Assignee changes require the caller's explicit advertised set;
+    this function never creates a route or changes worker launch settings.
+    """
+    if expected_state not in VALID_STATUSES:
+        raise ValueError(f"expected_state must be one of {sorted(VALID_STATUSES)}")
+    if not fields:
+        raise ValueError("at least one editable field is required")
+    unknown_fields = set(fields) - EDITABLE_TASK_FIELDS
+    if unknown_fields:
+        raise ValueError(f"unsupported task field(s): {sorted(unknown_fields)}")
+
+    updates: list[tuple[str, Any]] = []
+    if "title" in fields:
+        title = fields["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("title must be a non-empty string")
+        updates.append(("title", title.strip()))
+    if "priority" in fields:
+        priority = fields["priority"]
+        if isinstance(priority, bool) or not isinstance(priority, int):
+            raise ValueError("priority must be an integer")
+        updates.append(("priority", priority))
+    if "autonomy" in fields:
+        autonomy = fields["autonomy"]
+        if autonomy is not None and (
+            not isinstance(autonomy, str) or autonomy not in VALID_AUTONOMY
+        ):
+            raise ValueError("autonomy must be one of A1, A2, A3, or None")
+        updates.append(("autonomy", autonomy))
+    if "assignee" in fields:
+        assignee = fields["assignee"]
+        if assignee is not None and not isinstance(assignee, str):
+            raise ValueError("assignee must be a string or None")
+        assignee = _canonical_assignee(assignee)
+        if assignee is not None:
+            if allowed_assignees is None:
+                raise ValueError("allowed_assignees is required when assigning a task")
+            allowed = {
+                normalized
+                for name in allowed_assignees
+                if (normalized := _canonical_assignee(str(name))) is not None
+            }
+            if assignee not in allowed:
+                raise ValueError(f"assignee is not allowed: {assignee!r}")
+        updates.append(("assignee", assignee))
+
+    parents: Optional[tuple[str, ...]] = None
+    if "parent_ids" in fields:
+        raw_parents = fields["parent_ids"]
+        if isinstance(raw_parents, (str, bytes)):
+            raise ValueError("parent_ids must be an iterable of task ids")
+        try:
+            parents = tuple(dict.fromkeys(str(parent).strip() for parent in raw_parents))
+        except TypeError as exc:
+            raise ValueError("parent_ids must be an iterable of task ids") from exc
+        if not all(parents):
+            raise ValueError("parent_ids cannot contain empty task ids")
+        if task_id in parents:
+            raise ValueError("a task cannot depend on itself")
+
+    with write_txn(conn):
+        current = conn.execute(
+            "SELECT status, claim_lock FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if current is None or current["status"] != expected_state:
+            return None
+        if "assignee" in fields and current["claim_lock"] is not None and current["status"] == "running":
+            raise RuntimeError(
+                f"cannot reassign {task_id}: currently running (claimed). "
+                "Wait for completion or reclaim the stale lock first."
+            )
+
+        assignments = updates or [("status", current["status"])]
+        sql = "UPDATE tasks SET " + ", ".join(f"{name} = ?" for name, _ in assignments)
+        params = [value for _, value in assignments] + [task_id, expected_state]
+        if conn.execute(sql + " WHERE id = ? AND status = ?", params).rowcount != 1:
+            return None
+
+        if parents is not None:
+            missing = _find_missing_parents(conn, parents)
+            if missing:
+                raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
+            conn.execute("DELETE FROM task_links WHERE child_id = ?", (task_id,))
+            for parent_id in parents:
+                if _would_cycle(conn, parent_id, task_id):
+                    raise ValueError(
+                        f"linking {parent_id} -> {task_id} would create a cycle"
+                    )
+                conn.execute(
+                    "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                    (parent_id, task_id),
+                )
+            if parents:
+                rows = conn.execute(
+                    "SELECT status FROM tasks WHERE id IN (" + ",".join("?" * len(parents)) + ")",
+                    parents,
+                ).fetchall()
+                if any(row["status"] != "done" for row in rows):
+                    conn.execute(
+                        "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                        (task_id,),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
+                        (task_id,),
+                    )
+            else:
+                conn.execute(
+                    "UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
+                    (task_id,),
+                )
+
+        _append_event(conn, task_id, "fields_updated", {"fields": sorted(fields)})
+        return get_task(conn, task_id)
 
 
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:

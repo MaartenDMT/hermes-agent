@@ -206,6 +206,7 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
     assert "idx_tasks_tenant" in indexes
     assert "idx_tasks_idempotency" in indexes
     assert "idx_events_run" in indexes
+    assert "autonomy" in task_columns
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +235,144 @@ def test_create_task_with_parent_is_todo_until_parent_done(kanban_home):
 def test_create_task_unknown_parent_errors(kanban_home):
     with kb.connect() as conn, pytest.raises(ValueError, match="unknown parent"):
         kb.create_task(conn, title="orphan", parents=["t_ghost"])
+
+
+def test_update_task_fields_updates_only_safe_fields_and_rereads_task(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="before",
+            assignee="alice",
+            workspace_path="C:/must-not-change",
+        )
+
+        task = kb.update_task_fields(
+            conn,
+            task_id,
+            expected_state="ready",
+            fields={"title": "after", "priority": 7, "assignee": "bob"},
+            allowed_assignees={"alice", "bob"},
+        )
+
+    assert task is not None
+    assert task.title == "after"
+    assert task.priority == 7
+    assert task.assignee == "bob"
+    assert task.workspace_path == "C:/must-not-change"
+
+
+def test_update_task_fields_rejects_a_stale_state_without_mutation(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="before")
+        task = kb.update_task_fields(
+            conn,
+            task_id,
+            expected_state="todo",
+            fields={"title": "after"},
+        )
+        persisted = kb.get_task(conn, task_id)
+
+    assert task is None
+    assert persisted is not None
+    assert persisted.title == "before"
+
+
+def test_update_task_fields_persists_only_bounded_autonomy_values(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="safe")
+        task = kb.update_task_fields(
+            conn,
+            task_id,
+            expected_state="ready",
+            fields={"autonomy": "A2"},
+        )
+
+    assert task is not None
+    assert task.autonomy == "A2"
+
+
+@pytest.mark.parametrize("autonomy", ["A0", "a2", "", 2])
+def test_update_task_fields_rejects_invalid_autonomy(kanban_home, autonomy):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="safe")
+        with pytest.raises(ValueError, match="autonomy must"):
+            kb.update_task_fields(
+                conn,
+                task_id,
+                expected_state="ready",
+                fields={"autonomy": autonomy},
+            )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["workspace_path", "executable", "args", "environment", "skills", "model_override", "body"],
+)
+def test_update_task_fields_rejects_noneditable_fields(kanban_home, field):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="safe")
+        with pytest.raises(ValueError, match="unsupported task field"):
+            kb.update_task_fields(
+                conn,
+                task_id,
+                expected_state="ready",
+                fields={field: "blocked"},
+            )
+
+
+def test_update_task_fields_requires_an_advertised_assignee(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="safe")
+        with pytest.raises(ValueError, match="allowed_assignees"):
+            kb.update_task_fields(
+                conn,
+                task_id,
+                expected_state="ready",
+                fields={"assignee": "unknown"},
+            )
+        with pytest.raises(ValueError, match="not allowed"):
+            kb.update_task_fields(
+                conn,
+                task_id,
+                expected_state="ready",
+                fields={"assignee": "unknown"},
+                allowed_assignees={"known"},
+            )
+
+
+def test_update_task_fields_replaces_dependencies_and_updates_readiness(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child")
+        task = kb.update_task_fields(
+            conn,
+            child,
+            expected_state="ready",
+            fields={"parent_ids": [parent]},
+        )
+
+    assert task is not None
+    assert task.status == "todo"
+    with kb.connect() as conn:
+        assert kb.parent_ids(conn, child) == [parent]
+
+
+def test_update_task_fields_rolls_back_dependencies_when_they_cycle(kanban_home):
+    with kb.connect() as conn:
+        old_parent = kb.create_task(conn, title="old")
+        first = kb.create_task(conn, title="first", parents=[old_parent])
+        second = kb.create_task(conn, title="second", parents=[first])
+        third = kb.create_task(conn, title="third", parents=[second])
+
+        with pytest.raises(ValueError, match="cycle"):
+            kb.update_task_fields(
+                conn,
+                first,
+                expected_state="todo",
+                fields={"parent_ids": [third]},
+            )
+
+        assert kb.parent_ids(conn, first) == [old_parent]
 
 
 def test_workspace_kind_validation(kanban_home):

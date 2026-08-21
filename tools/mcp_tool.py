@@ -4688,7 +4688,11 @@ def _handle_auth_error_and_retry(
     manager = get_manager()
 
     async def _recover():
-        return await manager.handle_401(server_name, None)
+        from hermes_constants import get_hermes_home
+
+        return await manager.handle_401(
+            server_name, None, hermes_home=get_hermes_home()
+        )
 
     try:
         recovered = _run_on_mcp_loop(_recover, timeout=10)

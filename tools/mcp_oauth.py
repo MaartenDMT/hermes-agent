@@ -213,6 +213,18 @@ def _find_free_port() -> int:
 # build_oauth_auth calls (reconnect loops) cannot leak fds.
 _reserved_sockets: "dict[int, socket.socket]" = {}
 _MAX_RESERVED_SOCKETS = 8
+_LOOPBACK_REDIRECT_HOSTS = frozenset({"127.0.0.1", "localhost"})
+
+
+def _validate_redirect_host(host: object) -> str:
+    """Return a supported loopback callback host or fail before binding."""
+    resolved = str(host or "127.0.0.1")
+    if resolved not in _LOOPBACK_REDIRECT_HOSTS:
+        raise OAuthNonInteractiveError(
+            "oauth.redirect_host must be a loopback host "
+            "('127.0.0.1' or 'localhost')"
+        )
+    return resolved
 
 
 def _reserve_callback_port(port: int = 0, host: str = "127.0.0.1") -> int:
@@ -1229,6 +1241,8 @@ def _configure_callback_port(
     global _oauth_port
     from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
 
+    host = _validate_redirect_host(cfg.get("redirect_host"))
+
     dashboard_flow = get_dashboard_oauth_flow()
     if dashboard_flow is not None:
         cfg["_resolved_port"] = 0
@@ -1245,7 +1259,6 @@ def _configure_callback_port(
     # held until the waiter adopts it, so fixed ports fail before an
     # authorization URL can be opened and ephemeral ports remain race-free.
     fixed_port = requested or _cached_redirect_port(storage)
-    host = cfg.get("redirect_host") or "127.0.0.1"
     port = _reserve_callback_port(fixed_port or 0, host)
     cfg["_resolved_port"] = port
     _oauth_port = port  # legacy consumer: _wait_for_callback reads this
@@ -1271,7 +1284,7 @@ def _resolve_redirect_uri(cfg: dict, port: int) -> str:
     configured = cfg.get("redirect_uri")
     if configured:
         return configured
-    host = cfg.get("redirect_host") or "127.0.0.1"
+    host = _validate_redirect_host(cfg.get("redirect_host"))
     return f"http://{host}:{port}/callback"
 
 

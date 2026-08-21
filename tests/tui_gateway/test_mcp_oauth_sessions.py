@@ -53,3 +53,13 @@ def test_busy_fixed_port_fails_before_authorization_worker_starts(monkeypatch):
         assert started == []
     finally:
         blocker.close()
+
+
+def test_non_loopback_redirect_host_rejected_before_binding():
+    from tui_gateway.mcp_oauth_sessions import _start_loopback_listener
+    from tools.mcp_oauth import OAuthNonInteractiveError
+
+    with pytest.raises(OAuthNonInteractiveError, match="redirect_host.*loopback"):
+        _start_loopback_listener(
+            _Flow(), {"oauth": {"redirect_host": "0.0.0.0", "redirect_port": 8765}}
+        )

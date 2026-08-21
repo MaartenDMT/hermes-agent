@@ -1035,7 +1035,7 @@ def cmd_mcp_configure(args):
         def matches_name_filter(tool_name, patterns):
             return tool_name in patterns
 
-    if include and isinstance(include, list):
+    if isinstance(include, list):
         include_set = {str(p) for p in include}
         pre_selected = {
             i for i, tn in enumerate(tool_names)
@@ -1075,8 +1075,19 @@ def cmd_mcp_configure(args):
     server_entry = cfg_get(config, "mcp_servers", name, default={})
 
     if len(chosen) == total:
-        # All selected → remove include/exclude (register all)
-        server_entry.pop("tools", None)
+        tools_block = server_entry.get("tools") or {}
+        if not isinstance(tools_block, dict):
+            tools_block = {}
+        if tools_block.get("require_positive_include") is True:
+            tools_block["include"] = list(tool_names)
+            tools_block.pop("exclude", None)
+        else:
+            tools_block.pop("include", None)
+            tools_block.pop("exclude", None)
+        if tools_block:
+            server_entry["tools"] = tools_block
+        else:
+            server_entry.pop("tools", None)
     else:
         chosen_names = [tool_names[i] for i in sorted(chosen)]
         server_entry.setdefault("tools", {})

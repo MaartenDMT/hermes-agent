@@ -774,6 +774,8 @@ class MCPOAuthManager:
         self,
         server_name: str,
         failed_access_token: Optional[str] = None,
+        *,
+        hermes_home: str | Path | None = None,
     ) -> bool:
         """Handle a 401 from a tool call, deduplicated across concurrent callers.
 
@@ -788,7 +790,8 @@ class MCPOAuthManager:
         the same ``failed_access_token``, only one recovery attempt fires.
         Others await the same future.
         """
-        entry = self._entries.get(self._key(server_name))
+        resolved_home, _ = self._key(server_name, hermes_home)
+        entry = self._entries.get((resolved_home, server_name))
         if entry is None or entry.provider is None:
             return False
 
@@ -805,7 +808,7 @@ class MCPOAuthManager:
                     try:
                         # Step 1: Did disk change? Picks up external refresh.
                         disk_changed = await self.invalidate_if_disk_changed(
-                            server_name
+                            server_name, hermes_home=resolved_home
                         )
                         if disk_changed:
                             if not pending.done():

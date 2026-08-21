@@ -470,6 +470,44 @@ class TestToolSelection:
             "include": [], "resources": False, "prompts": False,
         }
 
+    def test_all_selected_preserves_required_positive_allowlist(
+        self, catalog_dir, monkeypatch
+    ):
+        body = _basic_manifest(tools={
+            "default_enabled": [],
+            "require_positive_include": True,
+            "resources": False,
+            "prompts": False,
+        })
+        _write_manifest(catalog_dir, "demo", body)
+        import hermes_cli.mcp_catalog as mc
+        monkeypatch.setattr(mc, "_probe_tools", lambda _name: self._make_probed("read_a", "read_b"))
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr(
+            "hermes_cli.curses_ui.curses_checklist", lambda *_a, **_k: {0, 1}
+        )
+
+        mc.install_entry(_entry("demo"), enable=True)
+
+        from hermes_cli.config import load_config
+        assert load_config()["mcp_servers"]["demo"]["tools"] == {
+            "include": ["read_a", "read_b"],
+            "require_positive_include": True,
+            "resources": False,
+            "prompts": False,
+        }
+
+    def test_catalog_rejects_non_loopback_oauth_redirect_host(self, catalog_dir):
+        body = _basic_manifest(
+            transport={"type": "http", "url": "https://mcp.example.test"},
+            auth={"type": "oauth", "redirect_host": "0.0.0.0"},
+        )
+        path = _write_manifest(catalog_dir, "demo", body)
+        from hermes_cli.mcp_catalog import CatalogError, _parse_manifest
+
+        with pytest.raises(CatalogError, match="redirect_host.*127.0.0.1.*localhost"):
+            _parse_manifest(path)
+
 
 
 

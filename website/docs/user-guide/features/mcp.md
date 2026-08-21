@@ -110,7 +110,10 @@ The pre-checked rows come from:
 
 Submit the checklist with ENTER. Only the checked tools end up in
 `mcp_servers.<name>.tools.include`. If you select everything, no filter is
-written (cleanest config shape, identical behavior).
+written unless the manifest declares `tools.require_positive_include: true`.
+That fail-closed marker preserves the exact current names even when every
+discovered tool is selected, so future server tools remain unavailable until
+they are reviewed and explicitly included.
 
 **If the probe fails** (server unreachable, OAuth not yet completed,
 backing service not running), the install still succeeds: the manifest's

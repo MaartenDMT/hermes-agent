@@ -32,6 +32,7 @@ auth:
 default_enabled: false
 tools:
   default_enabled: []
+  require_positive_include: true
   resources: false
   prompts: false
 

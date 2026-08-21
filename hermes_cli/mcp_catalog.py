@@ -116,6 +116,7 @@ class ToolsSpec:
     # applied directly when probe fails). If None, all probed tools are
     # pre-checked (or no filter is written when probe fails).
     default_enabled: Optional[List[str]] = None
+    require_positive_include: bool = False
     resources: Optional[bool] = None
     prompts: Optional[bool] = None
 
@@ -279,8 +280,14 @@ def _parse_manifest(path: Path) -> CatalogEntry:
         or not 1 <= auth.redirect_port <= 65535
     ):
         raise CatalogError(f"{path}: auth.redirect_port must be an integer from 1 to 65535")
-    if auth.redirect_host is not None and not isinstance(auth.redirect_host, str):
-        raise CatalogError(f"{path}: auth.redirect_host must be a string")
+    if auth.redirect_host is not None:
+        if not isinstance(auth.redirect_host, str):
+            raise CatalogError(f"{path}: auth.redirect_host must be a string")
+        if auth.redirect_host not in {"127.0.0.1", "localhost"}:
+            raise CatalogError(
+                f"{path}: auth.redirect_host must be loopback "
+                "('127.0.0.1' or 'localhost')"
+            )
     if t_type == "http" and a_type == "api_key":
         # _build_server_config emits an Authorization header referencing
         # ${MCP_<NAME>_API_KEY} (via _bearer_auth_headers), but install_entry
@@ -310,12 +317,18 @@ def _parse_manifest(path: Path) -> CatalogEntry:
             )
     resources = tools_raw.get("resources")
     prompts = tools_raw.get("prompts")
+    require_positive_include = tools_raw.get("require_positive_include", False)
     if resources is not None and not isinstance(resources, bool):
         raise CatalogError(f"{path}: tools.resources must be a boolean")
     if prompts is not None and not isinstance(prompts, bool):
         raise CatalogError(f"{path}: tools.prompts must be a boolean")
+    if not isinstance(require_positive_include, bool):
+        raise CatalogError(
+            f"{path}: tools.require_positive_include must be a boolean"
+        )
     tools_spec = ToolsSpec(
         default_enabled=default_enabled,
+        require_positive_include=require_positive_include,
         resources=resources,
         prompts=prompts,
     )
@@ -814,7 +827,7 @@ def _apply_tool_selection(
         ))
         return
 
-    if len(chosen_indices) == len(probed):
+    if len(chosen_indices) == len(probed) and not entry.tools.require_positive_include:
         # Everything selected — clear filter for the cleanest config shape.
         # NOTE: this means any tools the server adds later (e.g. a future MCP
         # version) will also be auto-enabled. To pin to the current set,
@@ -904,6 +917,8 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
     server_cfg = _build_server_config(entry, install_dir)
     server_cfg["enabled"] = enable and entry.default_enabled
     tools_cfg = {}
+    if entry.tools.require_positive_include:
+        tools_cfg["require_positive_include"] = True
     if entry.tools.resources is not None:
         tools_cfg["resources"] = entry.tools.resources
     if entry.tools.prompts is not None:

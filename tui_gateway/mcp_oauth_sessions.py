@@ -115,7 +115,9 @@ def _start_loopback_listener(flow, cfg: dict) -> tuple["http.server.HTTPServer",
 
     oauth_cfg = cfg.get("oauth") or {}
     requested_port = int(oauth_cfg.get("redirect_port", 0) or 0)
-    redirect_host = oauth_cfg.get("redirect_host") or "127.0.0.1"
+    from tools.mcp_oauth import _validate_redirect_host
+
+    redirect_host = _validate_redirect_host(oauth_cfg.get("redirect_host"))
     try:
         httpd = http.server.HTTPServer((redirect_host, requested_port), _Handler)
     except OSError as exc:

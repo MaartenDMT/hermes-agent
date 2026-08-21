@@ -61,6 +61,44 @@ def test_manager_isolates_same_named_servers_by_profile_home(tmp_path, monkeypat
     assert providers[1]._initialized is True
 
 
+def test_handle_401_refresh_is_isolated_to_resolved_profile(tmp_path):
+    from tools.mcp_oauth_manager import MCPOAuthManager, _ProviderEntry
+
+    profile_a = tmp_path / "profile-a"
+    profile_b = tmp_path / "profile-b"
+    manager = MCPOAuthManager()
+
+    class _Provider:
+        def __init__(self):
+            self._initialized = True
+            self.context = None
+
+    providers = [_Provider(), _Provider()]
+    for home, provider in zip((profile_a, profile_b), providers):
+        token_dir = home / "mcp-tokens"
+        token_dir.mkdir(parents=True)
+        (token_dir / "shared.json").write_text('{"access_token":"token"}')
+        manager._entries[manager._key("shared", home)] = _ProviderEntry(
+            server_url="https://mcp.example.test",
+            oauth_config=None,
+            provider=provider,
+        )
+        assert asyncio.run(manager.invalidate_if_disk_changed("shared", hermes_home=home))
+        provider._initialized = True
+
+    token_b = profile_b / "mcp-tokens" / "shared.json"
+    future_mtime = time.time() + 10
+    os.utime(token_b, (future_mtime, future_mtime))
+
+    recovered = asyncio.run(manager.handle_401(
+        "shared", failed_access_token="bad-b", hermes_home=profile_b
+    ))
+
+    assert recovered is True
+    assert providers[0]._initialized is True
+    assert providers[1]._initialized is False
+
+
 def test_manager_restore_entry_preserves_newer_concurrent_entry(tmp_path, monkeypatch):
     from tools.mcp_oauth_manager import MCPOAuthManager
 

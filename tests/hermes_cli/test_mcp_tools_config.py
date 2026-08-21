@@ -73,3 +73,65 @@ def test_empty_tools_server_skipped(capsys):
     assert len(checklist_calls) == 0
     captured = capsys.readouterr()
     assert "no tools found" in captured.out
+
+
+def test_mcp_configure_all_selected_preserves_required_positive_allowlist(monkeypatch):
+    from types import SimpleNamespace
+    import hermes_cli.mcp_config as mc
+
+    server = {
+        "command": "npx",
+        "tools": {
+            "include": ["read_a"],
+            "require_positive_include": True,
+            "resources": False,
+            "prompts": False,
+        },
+    }
+    config = {"mcp_servers": {"safe": server}}
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(mc, "_get_mcp_servers", lambda: {"safe": server})
+    monkeypatch.setattr(
+        mc, "_probe_single_server", lambda *_a, **_k: [("read_a", "A"), ("read_b", "B")]
+    )
+    monkeypatch.setattr(
+        "hermes_cli.curses_ui.curses_checklist", lambda *_a, **_k: {0, 1}
+    )
+    monkeypatch.setattr(mc, "load_config", lambda: config)
+    saved = []
+    monkeypatch.setattr(mc, "save_config", lambda value: saved.append(value))
+
+    mc.cmd_mcp_configure(SimpleNamespace(name="safe"))
+
+    assert saved[0]["mcp_servers"]["safe"]["tools"] == {
+        "include": ["read_a", "read_b"],
+        "require_positive_include": True,
+        "resources": False,
+        "prompts": False,
+    }
+
+
+def test_mcp_configure_empty_positive_allowlist_preselects_nothing(monkeypatch):
+    from types import SimpleNamespace
+    import hermes_cli.mcp_config as mc
+
+    server = {
+        "command": "npx",
+        "tools": {"include": [], "require_positive_include": True},
+    }
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(mc, "_get_mcp_servers", lambda: {"safe": server})
+    monkeypatch.setattr(
+        mc, "_probe_single_server", lambda *_a, **_k: [("read_a", "A"), ("read_b", "B")]
+    )
+    captured = []
+
+    def checklist(_title, _labels, pre_selected):
+        captured.append(pre_selected)
+        return pre_selected
+
+    monkeypatch.setattr("hermes_cli.curses_ui.curses_checklist", checklist)
+
+    mc.cmd_mcp_configure(SimpleNamespace(name="safe"))
+
+    assert captured == [set()]

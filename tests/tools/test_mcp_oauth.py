@@ -506,6 +506,14 @@ class TestCallbackPortReservation:
             with pytest.raises(mod.OAuthNonInteractiveError, match=f"port {port} cannot bind"):
                 mod._configure_callback_port({"redirect_port": port})
 
+    def test_non_loopback_redirect_host_rejected_before_reservation(self):
+        import tools.mcp_oauth as mod
+
+        before = set(mod._reserved_sockets)
+        with pytest.raises(mod.OAuthNonInteractiveError, match="redirect_host.*loopback"):
+            mod._configure_callback_port({"redirect_host": "0.0.0.0"})
+        assert set(mod._reserved_sockets) == before
+
     def test_pinned_port_real_callback_round_trip(self, monkeypatch):
         import asyncio
         import socket as sock

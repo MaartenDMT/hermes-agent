@@ -684,8 +684,16 @@ def _write_tools_include(name: str, include: Optional[List[str]]) -> None:
     servers = cfg.setdefault("mcp_servers", {})
     server_entry = servers.get(name) or {}
     if include is None:
-        # No filter — drop any existing tools block.
-        server_entry.pop("tools", None)
+        # Clear only the name filter. Capability gates such as
+        # resources/prompts are independent policy and must survive.
+        tools_block = server_entry.get("tools") or {}
+        if isinstance(tools_block, dict):
+            tools_block.pop("include", None)
+            tools_block.pop("exclude", None)
+            if tools_block:
+                server_entry["tools"] = tools_block
+            else:
+                server_entry.pop("tools", None)
     else:
         tools_block = server_entry.get("tools") or {}
         if not isinstance(tools_block, dict):
@@ -745,8 +753,9 @@ def _apply_tool_selection(
         return
 
     if not probed:
-        # Probe succeeded but server reported zero tools. Nothing to filter.
-        _write_tools_include(entry.name, None)
+        # A successful empty probe is not permission to discard a manifest's
+        # fail-closed positive allowlist.
+        _write_tools_include(entry.name, entry.tools.default_enabled)
         print(color("  Server reported no tools.", Colors.YELLOW))
         return
 

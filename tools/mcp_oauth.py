@@ -215,8 +215,8 @@ _reserved_sockets: "dict[int, socket.socket]" = {}
 _MAX_RESERVED_SOCKETS = 8
 
 
-def _reserve_callback_port() -> int:
-    """Pick an ephemeral callback port and keep its socket bound.
+def _reserve_callback_port(port: int = 0, host: str = "127.0.0.1") -> int:
+    """Reserve an explicit or ephemeral callback endpoint.
 
     Returns the port. The bound (not yet listening) socket is parked in
     ``_reserved_sockets`` so no other process can bind the port before
@@ -225,9 +225,15 @@ def _reserve_callback_port() -> int:
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        s.bind(("127.0.0.1", 0))
-    except OSError:
+        s.bind((host, port))
+    except OSError as exc:
         s.close()
+        if port:
+            raise OAuthNonInteractiveError(
+                f"OAuth callback port {port} cannot bind on {host} ({exc}). "
+                "Close the process using it or configure a free "
+                "`oauth.redirect_port`, then retry."
+            ) from exc
         raise
     port = s.getsockname()[1]
     # Evict oldest reservations past the cap (dict preserves insertion order).
@@ -856,7 +862,9 @@ async def _wait_for_callback() -> tuple[str, str | None]:
     return await _make_callback_waiter(_oauth_port)()
 
 
-def _make_callback_waiter(port: int, timeout: float = 300.0):
+def _make_callback_waiter(
+    port: int, timeout: float = 300.0, host: str = "127.0.0.1"
+):
     """Return a callback waiter bound to a single OAuth flow's port.
 
     ``timeout`` bounds how long the waiter polls for the redirect. It used to
@@ -919,7 +927,7 @@ def _make_callback_waiter(port: int, timeout: float = 300.0):
         # (#44590).
         try:
             server = HTTPServer(
-                ("127.0.0.1", port), handler_cls, bind_and_activate=False
+                (host, port), handler_cls, bind_and_activate=False
             )
             reserved = _reserved_sockets.pop(port, None)
             if reserved is not None:
@@ -1233,14 +1241,12 @@ def _configure_callback_port(
         return 0
     requested = int(cfg.get("redirect_port", 0))
     # Precedence: explicit config port → cached client-registration port →
-    # fresh ephemeral port. The cached port keeps re-auth consistent with the
-    # redirect URI pinned at dynamic client registration (providers reject a
-    # mismatched URI). Only a truly fresh ephemeral pick goes through
-    # _reserve_callback_port(), which keeps the socket bound until
-    # _wait_for_callback adopts it — closing the select→bind TOCTOU race
-    # (#22161). Explicit and cached ports are fixed, known values and bind
-    # via the reuse_address path instead.
-    port = requested or _cached_redirect_port(storage) or _reserve_callback_port()
+    # fresh ephemeral port. Every local callback port is reserved here and
+    # held until the waiter adopts it, so fixed ports fail before an
+    # authorization URL can be opened and ephemeral ports remain race-free.
+    fixed_port = requested or _cached_redirect_port(storage)
+    host = cfg.get("redirect_host") or "127.0.0.1"
+    port = _reserve_callback_port(fixed_port or 0, host)
     cfg["_resolved_port"] = port
     _oauth_port = port  # legacy consumer: _wait_for_callback reads this
     return port
@@ -1256,12 +1262,11 @@ def _resolve_redirect_uri(cfg: dict, port: int) -> str:
     client info must derive the redirect_uri here so they stay identical — a
     mismatch makes the authorization server reject the callback.
 
-    ``redirect_host`` (default ``127.0.0.1``) tweaks only the hostname of the
-    loopback callback. Some providers' WAFs (e.g. Reclaim.ai's AWS API Gateway)
+    ``redirect_host`` (default ``127.0.0.1``) selects the loopback hostname for
+    both the callback URL and listener. Some providers' WAFs (e.g. Reclaim.ai's AWS API Gateway)
     reject any authorize request whose query string contains a literal
     ``127.0.0.1``, returning ``{"message":"Forbidden"}``; ``redirect_host:
-    localhost`` works around that. The callback listener still binds
-    ``127.0.0.1`` either way.
+    localhost`` works around that.
     """
     configured = cfg.get("redirect_uri")
     if configured:
@@ -1559,7 +1564,9 @@ def build_oauth_auth(
     apply_oauth_provider_defaults(
         cfg, server_name=server_name, server_url=server_url
     )
-    storage = HermesTokenStorage(server_name)
+    from hermes_constants import get_hermes_home
+
+    storage = HermesTokenStorage(server_name, hermes_home=get_hermes_home())
 
     if not _is_interactive() and not storage.has_cached_tokens():
         raise OAuthNonInteractiveError(
@@ -1580,7 +1587,9 @@ def build_oauth_auth(
         resolved_port, redirect_uri=cfg.get("redirect_uri") or None
     )
     callback_handler = _make_callback_waiter(
-        resolved_port, timeout=float(cfg.get("timeout", 300))
+        resolved_port,
+        timeout=float(cfg.get("timeout", 300)),
+        host=cfg.get("redirect_host") or "127.0.0.1",
     )
 
     provider_class = _get_hermes_oauth_provider_class()

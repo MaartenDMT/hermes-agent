@@ -23,7 +23,7 @@ auth:
       secret: true
   client_id_env: HUBSPOT_MCP_CLIENT_ID
   client_secret_env: HUBSPOT_MCP_CLIENT_SECRET
-  redirect_host: localhost
+  redirect_host: 127.0.0.1
   redirect_port: 8765
 
 # HubSpot's unauthenticated metadata does not publish canonical read-tool names.
@@ -37,7 +37,7 @@ tools:
 
 post_install: |
   Register a HubSpot app with this exact redirect URI:
-    http://localhost:8765/callback
+    http://127.0.0.1:8765/callback
 
   Then run `hermes mcp login hubspot` to authenticate. The server remains
   disabled and exposes no tools after login. Inspect the authenticated tool

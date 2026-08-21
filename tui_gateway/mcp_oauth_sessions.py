@@ -81,8 +81,7 @@ def _start_loopback_listener(flow, cfg: dict) -> tuple["http.server.HTTPServer",
     Returns the running HTTPServer and matching redirect URI. A configured
     fixed port binds before the worker starts, so a collision fails before the
     authorization request. Without configuration, the OS still picks a free
-    ephemeral port. ``redirect_host`` changes the URI hostname only; the
-    listener remains loopback-bound.
+    ephemeral port. ``redirect_host`` is used for both the URI and listener.
     """
 
     class _Handler(http.server.BaseHTTPRequestHandler):
@@ -118,12 +117,12 @@ def _start_loopback_listener(flow, cfg: dict) -> tuple["http.server.HTTPServer",
     requested_port = int(oauth_cfg.get("redirect_port", 0) or 0)
     redirect_host = oauth_cfg.get("redirect_host") or "127.0.0.1"
     try:
-        httpd = http.server.HTTPServer(("127.0.0.1", requested_port), _Handler)
+        httpd = http.server.HTTPServer((redirect_host, requested_port), _Handler)
     except OSError as exc:
         if requested_port:
             raise RuntimeError(
                 f"MCP '{flow.server_name}' configured OAuth callback port "
-                f"{requested_port} cannot bind on 127.0.0.1: {exc}"
+                f"{requested_port} cannot bind on {redirect_host}: {exc}"
             ) from exc
         raise
     port = httpd.server_address[1]
@@ -173,7 +172,7 @@ def _worker(session_id: str, hermes_home: str, server_name: str, cfg: dict, reco
                 from tools.mcp_oauth import HermesTokenStorage
 
                 manager = get_manager()
-                storage = HermesTokenStorage(server_name)
+                storage = HermesTokenStorage(server_name, hermes_home=hermes_home)
                 backup = storage.snapshot()
                 previous_entry = None
                 try:

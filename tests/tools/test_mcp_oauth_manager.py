@@ -46,6 +46,20 @@ def test_manager_isolates_same_named_servers_by_profile_home(tmp_path, monkeypat
     assert providers[0].context.current_tokens.access_token == "TOKEN_A"
     assert providers[1].context.current_tokens.access_token == "TOKEN_B"
 
+    # Establish independent disk-watch baselines, then refresh only profile A.
+    assert asyncio.run(manager.invalidate_if_disk_changed("shared", hermes_home=profile_a))
+    assert asyncio.run(manager.invalidate_if_disk_changed("shared", hermes_home=profile_b))
+    providers[0]._initialized = True
+    providers[1]._initialized = True
+    token_a = profile_a / "mcp-tokens" / "shared.json"
+    future_mtime = time.time() + 10
+    os.utime(token_a, (future_mtime, future_mtime))
+
+    assert asyncio.run(manager.invalidate_if_disk_changed("shared", hermes_home=profile_a))
+    assert not asyncio.run(manager.invalidate_if_disk_changed("shared", hermes_home=profile_b))
+    assert providers[0]._initialized is False
+    assert providers[1]._initialized is True
+
 
 def test_manager_restore_entry_preserves_newer_concurrent_entry(tmp_path, monkeypatch):
     from tools.mcp_oauth_manager import MCPOAuthManager

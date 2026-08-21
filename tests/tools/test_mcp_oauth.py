@@ -477,14 +477,63 @@ class TestCallbackPortReservation:
             if reserved is not None:
                 reserved.close()
 
-    def test_pinned_port_is_not_reserved(self):
+    def test_pinned_port_is_reserved_before_authorization(self):
+        import socket as sock
         import tools.mcp_oauth as mod
 
-        cfg: dict = {"redirect_port": 49399}
+        with sock.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            fixed_port = probe.getsockname()[1]
+        cfg: dict = {"redirect_port": fixed_port}
+        try:
+            port = mod._configure_callback_port(cfg)
+            assert port == fixed_port
+            assert cfg["_resolved_port"] == fixed_port
+            assert fixed_port in mod._reserved_sockets
+        finally:
+            reserved = mod._reserved_sockets.pop(fixed_port, None)
+            if reserved is not None:
+                reserved.close()
+
+    def test_busy_pinned_port_fails_during_configuration(self):
+        import socket as sock
+        import tools.mcp_oauth as mod
+
+        with sock.socket() as blocker:
+            blocker.bind(("127.0.0.1", 0))
+            blocker.listen()
+            port = blocker.getsockname()[1]
+            with pytest.raises(mod.OAuthNonInteractiveError, match=f"port {port} cannot bind"):
+                mod._configure_callback_port({"redirect_port": port})
+
+    def test_pinned_port_real_callback_round_trip(self, monkeypatch):
+        import asyncio
+        import socket as sock
+        import threading
+        import tools.mcp_oauth as mod
+
+        with sock.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            fixed_port = probe.getsockname()[1]
+        cfg = {"redirect_port": fixed_port, "redirect_host": "127.0.0.1"}
         port = mod._configure_callback_port(cfg)
-        assert port == 49399
-        assert cfg["_resolved_port"] == 49399
-        assert 49399 not in mod._reserved_sockets
+        monkeypatch.setattr(mod, "_is_interactive", lambda: False)
+        monkeypatch.setattr(mod, "_raise_if_non_interactive", lambda lead: None)
+
+        async def drive():
+            task = asyncio.create_task(mod._make_callback_waiter(
+                port, host=cfg["redirect_host"]
+            )())
+            threading.Thread(
+                target=_hit_callback_when_ready,
+                args=(f"http://127.0.0.1:{port}/callback?code=fixed&state=owned",),
+                daemon=True,
+            ).start()
+            return await asyncio.wait_for(task, timeout=20)
+
+        result = asyncio.run(drive())
+        assert result.code == "fixed"
+        assert result.state == "owned"
 
     def test_wait_for_callback_adopts_reserved_socket(self, monkeypatch):
         """E2E: reserve → _wait_for_callback binds the SAME socket and the

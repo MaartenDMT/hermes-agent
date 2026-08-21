@@ -7075,6 +7075,16 @@ def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]
         util_name = schema.get("name") or ""
         if not util_name:
             continue
+        if include_configured and not include_set:
+            continue
+        if handler_key in {"list_resources", "read_resource"} and tools_filter.get(
+            "resources", True
+        ) is False:
+            continue
+        if handler_key in {"list_prompts", "get_prompt"} and tools_filter.get(
+            "prompts", True
+        ) is False:
+            continue
         existing_toolset = registry.get_toolset_for_tool(util_name)
         if existing_toolset and existing_toolset != toolset_name:
             continue

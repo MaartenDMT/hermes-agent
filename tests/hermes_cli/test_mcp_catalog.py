@@ -453,6 +453,23 @@ class TestToolSelection:
         server = load_config()["mcp_servers"]["demo"]
         assert server["tools"]["include"] == ["a", "b", "c"]
 
+    def test_successful_zero_tool_probe_preserves_fail_closed_policy(
+        self, catalog_dir, monkeypatch
+    ):
+        body = _basic_manifest(
+            tools={"default_enabled": [], "resources": False, "prompts": False},
+        )
+        _write_manifest(catalog_dir, "demo", body)
+        import hermes_cli.mcp_catalog as mc
+        monkeypatch.setattr(mc, "_probe_tools", lambda _name: [])
+
+        mc.install_entry(_entry("demo"), enable=True)
+
+        from hermes_cli.config import load_config
+        assert load_config()["mcp_servers"]["demo"]["tools"] == {
+            "include": [], "resources": False, "prompts": False,
+        }
+
 
 
 

@@ -21,11 +21,12 @@ def test_loopback_listener_honors_fixed_port_and_redirect_host():
 
     port = _free_port()
     httpd, redirect_uri = _start_loopback_listener(
-        _Flow(), {"oauth": {"redirect_port": port, "redirect_host": "localhost"}}
+        _Flow(), {"oauth": {"redirect_port": port, "redirect_host": "127.0.0.1"}}
     )
     try:
         assert httpd.server_address[1] == port
-        assert redirect_uri == f"http://localhost:{port}/callback"
+        assert httpd.server_address[0] == "127.0.0.1"
+        assert redirect_uri == f"http://127.0.0.1:{port}/callback"
     finally:
         httpd.shutdown()
         httpd.server_close()

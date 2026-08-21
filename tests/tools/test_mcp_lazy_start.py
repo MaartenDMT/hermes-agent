@@ -306,6 +306,24 @@ class TestLazyFirstUseConnect:
 
 
 class TestCacheLoadDescriptionScan:
+    def test_fail_closed_filters_cached_tools_and_utilities(self):
+        from tools.registry import registry
+
+        entry = _fake_cache_entry()
+        entry["utility_tools"] = [
+            {"handler_key": "list_resources", "schema": {"name": "mcp__safe__list_resources"}},
+            {"handler_key": "list_prompts", "schema": {"name": "mcp__safe__list_prompts"}},
+        ]
+        config = {
+            "command": "npx",
+            "tools": {"include": [], "resources": False, "prompts": False},
+        }
+        with patch.object(registry, "register") as register:
+            registered = mcp._register_from_cache_sync("safe", config, entry)
+
+        assert registered == []
+        register.assert_not_called()
+
     def test_scan_runs_on_cache_load_path(self):
         # Defense-in-depth: the cache file is user-writable JSON, so the
         # cache-load registration path must run the same injection scan as

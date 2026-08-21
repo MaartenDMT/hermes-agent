@@ -574,7 +574,9 @@ class MCPOAuthManager:
                 self._entries[key] = entry
 
             if entry.provider is None:
-                entry.provider = self._build_provider(server_name, entry)
+                entry.provider = self._build_provider(
+                    server_name, entry, hermes_home=key[0]
+                )
                 if entry.provider is not None:
                     entry.provider._hermes_home = key[0]
 
@@ -594,6 +596,8 @@ class MCPOAuthManager:
         self,
         server_name: str,
         entry: _ProviderEntry,
+        *,
+        hermes_home: str | Path,
     ) -> Optional[Any]:
         """Build the underlying OAuth provider.
 
@@ -632,7 +636,7 @@ class MCPOAuthManager:
         apply_oauth_provider_defaults(
             cfg, server_name=server_name, server_url=entry.server_url
         )
-        storage = HermesTokenStorage(server_name)
+        storage = HermesTokenStorage(server_name, hermes_home=hermes_home)
 
         from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
 
@@ -659,7 +663,9 @@ class MCPOAuthManager:
         # configured `oauth.timeout` now bounds the callback waiter's own poll
         # loop instead — that is where the browser round-trip is awaited.
         callback_handler = _make_callback_waiter(
-            resolved_port, timeout=float(cfg.get("timeout", 300))
+            resolved_port,
+            timeout=float(cfg.get("timeout", 300)),
+            host=cfg.get("redirect_host") or "127.0.0.1",
         )
 
         return _HERMES_PROVIDER_CLS(

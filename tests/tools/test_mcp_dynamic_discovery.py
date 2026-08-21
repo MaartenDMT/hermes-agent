@@ -35,6 +35,20 @@ class TestRegisterServerTools:
             assert validate_toolset("my_srv") is True
             assert "mcp__my_srv__my_tool" in resolve_toolset("my_srv")
 
+    def test_empty_positive_include_registers_no_tools(self, mock_registry):
+        server = MCPServerTask("locked")
+        server._tools = [_make_mcp_tool("read"), _make_mcp_tool("write")]
+        server.session = MagicMock()
+
+        with patch("tools.registry.registry", mock_registry):
+            registered = _register_server_tools(
+                "locked",
+                server,
+                {"tools": {"include": [], "resources": False, "prompts": False}},
+            )
+
+        assert registered == []
+
 
 class TestRefreshTools:
     """Tests for MCPServerTask._refresh_tools nuke-and-repave cycle."""
@@ -74,6 +88,37 @@ class TestRefreshTools:
             assert "mcp__live_srv__new_tool" in mock_registry.get_all_tool_names()
             assert "mcp__live_srv__new_tool" in resolve_toolset("live_srv")
             assert server._registered_tool_names == ["mcp__live_srv__new_tool"]
+
+    def test_refresh_keeps_positive_include_boundary(self, mock_registry):
+        server = MCPServerTask("safe_srv")
+        server._refresh_lock = asyncio.Lock()
+        server._config = {
+            "tools": {
+                "include": ["read_contacts"],
+                "resources": False,
+                "prompts": False,
+            }
+        }
+        server._registered_tool_names = []
+        server.session = SimpleNamespace(
+            list_tools=AsyncMock(
+                return_value=SimpleNamespace(
+                    tools=[
+                        _make_mcp_tool("read_contacts"),
+                        _make_mcp_tool("delete_contact"),
+                    ]
+                )
+            )
+        )
+
+        async def refresh():
+            with patch("tools.registry.registry", mock_registry):
+                await server._refresh_tools()
+
+        asyncio.run(refresh())
+
+        assert server._registered_tool_names == ["mcp__safe_srv__read_contacts"]
+        assert "mcp__safe_srv__delete_contact" not in mock_registry.get_all_tool_names()
 
 
 class TestMessageHandler:

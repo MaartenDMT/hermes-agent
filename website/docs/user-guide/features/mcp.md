@@ -284,6 +284,24 @@ For fully headless gateways (messaging bot, no interactive terminal at all), the
 
 See [OAuth over SSH / Remote Hosts](../../guides/oauth-over-ssh.md#mcp-servers) for the full walkthrough, including DCR-less servers (e.g. Slack), pre-registered `client_id`/`client_secret`, scope customization, and re-auth via `hermes mcp login <server>`.
 
+### HubSpot: pre-registered and read-only by allowlist
+
+HubSpot's hosted MCP endpoint is `https://mcp.hubspot.com`.
+It requires a pre-registered HubSpot OAuth app and uses `client_secret_post`; it does not advertise Dynamic Client Registration.
+Install the catalog entry with `hermes mcp install hubspot` and enter the app client ID and client secret when prompted.
+Hermes writes those values only to the active profile's `.env`; `config.yaml` keeps `${HUBSPOT_MCP_CLIENT_ID}` and `${HUBSPOT_MCP_CLIENT_SECRET}` references.
+
+Register this exact redirect URI in the HubSpot app:
+
+```text
+http://localhost:8765/callback
+```
+
+The catalog entry installs disabled with `tools.include: []` because HubSpot's unauthenticated metadata does not provide a canonical authenticated read-tool list.
+After `hermes mcp login hubspot`, inspect the authenticated tools, add only the exact verified read-tool names to `mcp_servers.hubspot.tools.include`, and then set `mcp_servers.hubspot.enabled: true`.
+Start a new Hermes session after enabling it.
+Keep the positive include list; never substitute a write denylist, because newly added or renamed tools would otherwise become callable automatically.
+
 **Pitfall — providers that don't support automatic registration (Google Drive, Atlassian).** Some servers reject the dynamic client registration step (RFC 7591) that bare `auth: oauth` relies on — Google's official Drive server (`https://drivemcp.googleapis.com/mcp/v1`) returns a `400 Bad Request`, so no OAuth client is created and no token is acquired. The symptom is subtle: these servers also serve `tools/list` *without* auth, so `hermes mcp login` can list the tools and look like it worked, but every real tool call later times out. `hermes mcp login` now detects this (it checks that a token actually landed on disk) and tells you to supply your own OAuth client. Create one in the provider's console and add it to config:
 
 ```yaml

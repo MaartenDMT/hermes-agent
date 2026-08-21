@@ -42,7 +42,7 @@ from hermes_cli.colors import Colors, color
 from hermes_cli.config import (
     load_config,
     save_config,
-    get_env_value,
+    get_env_value_prefer_dotenv,
     save_env_value,
 )
 from hermes_cli.cli_output import prompt as _prompt_input
@@ -73,6 +73,10 @@ class AuthSpec:
     provider: Optional[str] = None
     scopes: List[str] = field(default_factory=list)
     env_var: Optional[str] = None
+    client_id_env: Optional[str] = None
+    client_secret_env: Optional[str] = None
+    redirect_host: Optional[str] = None
+    redirect_port: Optional[int] = None
 
 
 @dataclass
@@ -112,6 +116,8 @@ class ToolsSpec:
     # applied directly when probe fails). If None, all probed tools are
     # pre-checked (or no filter is written when probe fails).
     default_enabled: Optional[List[str]] = None
+    resources: Optional[bool] = None
+    prompts: Optional[bool] = None
 
 
 @dataclass
@@ -148,6 +154,7 @@ class CatalogEntry:
     post_install: str = ""
     suggest: Optional[SuggestSpec] = None
     manifest_path: Path = field(default_factory=Path)
+    default_enabled: bool = True
 
 
 # ─── Manifest loader ─────────────────────────────────────────────────────────
@@ -252,7 +259,28 @@ def _parse_manifest(path: Path) -> CatalogEntry:
         provider=auth_raw.get("provider"),
         scopes=list(auth_raw.get("scopes") or []),
         env_var=auth_raw.get("env_var"),
+        client_id_env=auth_raw.get("client_id_env"),
+        client_secret_env=auth_raw.get("client_secret_env"),
+        redirect_host=auth_raw.get("redirect_host"),
+        redirect_port=auth_raw.get("redirect_port"),
     )
+    declared_env_names = {spec.name for spec in env_list}
+    for field_name in ("client_id_env", "client_secret_env"):
+        env_name = getattr(auth, field_name)
+        if env_name is not None and not isinstance(env_name, str):
+            raise CatalogError(f"{path}: auth.{field_name} must be an env var name")
+        if env_name and env_name not in declared_env_names:
+            raise CatalogError(
+                f"{path}: auth.{field_name} must name an entry declared in auth.env"
+            )
+    if auth.redirect_port is not None and (
+        not isinstance(auth.redirect_port, int)
+        or isinstance(auth.redirect_port, bool)
+        or not 1 <= auth.redirect_port <= 65535
+    ):
+        raise CatalogError(f"{path}: auth.redirect_port must be an integer from 1 to 65535")
+    if auth.redirect_host is not None and not isinstance(auth.redirect_host, str):
+        raise CatalogError(f"{path}: auth.redirect_host must be a string")
     if t_type == "http" and a_type == "api_key":
         # _build_server_config emits an Authorization header referencing
         # ${MCP_<NAME>_API_KEY} (via _bearer_auth_headers), but install_entry
@@ -280,7 +308,17 @@ def _parse_manifest(path: Path) -> CatalogEntry:
             raise CatalogError(
                 f"{path}: tools.default_enabled must be a list of strings"
             )
-    tools_spec = ToolsSpec(default_enabled=default_enabled)
+    resources = tools_raw.get("resources")
+    prompts = tools_raw.get("prompts")
+    if resources is not None and not isinstance(resources, bool):
+        raise CatalogError(f"{path}: tools.resources must be a boolean")
+    if prompts is not None and not isinstance(prompts, bool):
+        raise CatalogError(f"{path}: tools.prompts must be a boolean")
+    tools_spec = ToolsSpec(
+        default_enabled=default_enabled,
+        resources=resources,
+        prompts=prompts,
+    )
 
     suggest: Optional[SuggestSpec] = None
     suggest_raw = data.get("suggest")
@@ -334,6 +372,10 @@ def _parse_manifest(path: Path) -> CatalogEntry:
             bootstrap=[str(c) for c in bootstrap],
         )
 
+    manifest_default_enabled = data.get("default_enabled", True)
+    if not isinstance(manifest_default_enabled, bool):
+        raise CatalogError(f"{path}: default_enabled must be a boolean")
+
     return CatalogEntry(
         name=name,
         description=description,
@@ -345,6 +387,7 @@ def _parse_manifest(path: Path) -> CatalogEntry:
         post_install=str(data.get("post_install") or ""),
         suggest=suggest,
         manifest_path=path,
+        default_enabled=manifest_default_enabled,
     )
 
 
@@ -539,7 +582,7 @@ def _prompt_env_vars(specs: List[EnvVarSpec]) -> Dict[str, str]:
     non-secrets alike to ~/.hermes/.env via save_env_value()."""
     collected: Dict[str, str] = {}
     for spec in specs:
-        existing = get_env_value(spec.name)
+        existing = get_env_value_prefer_dotenv(spec.name)
         if existing:
             print(color(f"  ✓ {spec.name} already set in .env", Colors.GREEN))
             collected[spec.name] = existing
@@ -575,6 +618,17 @@ def _build_server_config(
         cfg["url"] = t.url
         if entry.auth.type == "oauth":
             cfg["auth"] = "oauth"
+            oauth = {}
+            if entry.auth.client_id_env:
+                oauth["client_id"] = f"${{{entry.auth.client_id_env}}}"
+            if entry.auth.client_secret_env:
+                oauth["client_secret"] = f"${{{entry.auth.client_secret_env}}}"
+            if entry.auth.redirect_host:
+                oauth["redirect_host"] = entry.auth.redirect_host
+            if entry.auth.redirect_port is not None:
+                oauth["redirect_port"] = entry.auth.redirect_port
+            if oauth:
+                cfg["oauth"] = oauth
         elif entry.auth.type == "api_key":
             from hermes_cli.mcp_config import _bearer_auth_headers
 
@@ -670,7 +724,7 @@ def _apply_tool_selection(
     # Probe failure path
     if probed is None:
         manifest_default = entry.tools.default_enabled
-        if manifest_default:
+        if manifest_default is not None:
             _write_tools_include(entry.name, manifest_default)
             print(color(
                 f"  Couldn\'t probe server. Applied manifest default "
@@ -701,7 +755,7 @@ def _apply_tool_selection(
     # Build the pre-checked set in priority order
     if prior_selection:
         pre_set = {n for n in prior_selection if n in tool_names}
-    elif entry.tools.default_enabled:
+    elif entry.tools.default_enabled is not None:
         pre_set = {n for n in entry.tools.default_enabled if n in tool_names}
     else:
         pre_set = set(tool_names)
@@ -715,7 +769,7 @@ def _apply_tool_selection(
         if prior_selection is not None:
             include = [n for n in prior_selection if n in tool_names]
             _write_tools_include(entry.name, include)
-        elif entry.tools.default_enabled:
+        elif entry.tools.default_enabled is not None:
             include = [n for n in entry.tools.default_enabled if n in tool_names]
             _write_tools_include(entry.name, include)
         else:
@@ -808,6 +862,10 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
         print(color("  Configure credentials:", Colors.CYAN))
         _prompt_env_vars(entry.auth.env)
     elif entry.auth.type == "oauth":
+        if entry.auth.env:
+            print()
+            print(color("  Configure OAuth client credentials:", Colors.CYAN))
+            _prompt_env_vars(entry.auth.env)
         if entry.auth.provider:
             # Case 2: provider-mediated (Google, GitHub, etc.). We rely on
             # the existing `hermes auth <provider>` flow. Surface guidance
@@ -835,7 +893,14 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
     # Build and write the mcp_servers entry (without tools filter yet;
     # _apply_tool_selection() finalizes it below).
     server_cfg = _build_server_config(entry, install_dir)
-    server_cfg["enabled"] = enable
+    server_cfg["enabled"] = enable and entry.default_enabled
+    tools_cfg = {}
+    if entry.tools.resources is not None:
+        tools_cfg["resources"] = entry.tools.resources
+    if entry.tools.prompts is not None:
+        tools_cfg["prompts"] = entry.tools.prompts
+    if tools_cfg:
+        server_cfg["tools"] = tools_cfg
 
     from hermes_cli.mcp_config import _save_mcp_server
 
@@ -848,9 +913,10 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
     _apply_tool_selection(entry, prior_selection=prior_selection)
 
     print()
+    installed_enabled = enable and entry.default_enabled
     print(color(
         f"  ✓ Installed '{entry.name}' "
-        f"({'enabled' if enable else 'disabled'}). "
+        f"({'enabled' if installed_enabled else 'disabled'}). "
         f"Start a new Hermes session to load its tools.",
         Colors.GREEN,
     ))

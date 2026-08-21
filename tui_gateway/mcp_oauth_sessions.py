@@ -75,13 +75,14 @@ def _shutdown_listener(rec: Dict[str, Any]) -> None:
         rec["httpd"] = None
 
 
-def _start_loopback_listener(flow) -> "http.server.HTTPServer":
+def _start_loopback_listener(flow, cfg: dict) -> tuple["http.server.HTTPServer", str]:
     """Bind a loopback callback listener that feeds the flow's deliver_callback.
 
-    Returns the running HTTPServer (already serving on a daemon thread). The
-    bound port is read back off ``server.server_address`` so the caller can set
-    ``flow.redirect_uri`` to the matching ``/callback`` URL BEFORE the worker
-    starts the OAuth flow (the redirect URI must be pinned at authorization).
+    Returns the running HTTPServer and matching redirect URI. A configured
+    fixed port binds before the worker starts, so a collision fails before the
+    authorization request. Without configuration, the OS still picks a free
+    ephemeral port. ``redirect_host`` changes the URI hostname only; the
+    listener remains loopback-bound.
     """
 
     class _Handler(http.server.BaseHTTPRequestHandler):
@@ -113,14 +114,27 @@ def _start_loopback_listener(flow) -> "http.server.HTTPServer":
         def log_message(self, *_a):  # silence stdlib request logging
             return
 
-    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    oauth_cfg = cfg.get("oauth") or {}
+    requested_port = int(oauth_cfg.get("redirect_port", 0) or 0)
+    redirect_host = oauth_cfg.get("redirect_host") or "127.0.0.1"
+    try:
+        httpd = http.server.HTTPServer(("127.0.0.1", requested_port), _Handler)
+    except OSError as exc:
+        if requested_port:
+            raise RuntimeError(
+                f"MCP '{flow.server_name}' configured OAuth callback port "
+                f"{requested_port} cannot bind on 127.0.0.1: {exc}"
+            ) from exc
+        raise
+    port = httpd.server_address[1]
+    redirect_uri = f"http://{redirect_host}:{port}/callback"
     threading.Thread(
         target=httpd.serve_forever,
         kwargs={"poll_interval": 0.5},
         daemon=True,
         name=f"mcp-oauth-cb-{flow.server_name}",
     ).start()
-    return httpd
+    return httpd, redirect_uri
 
 
 def _worker(session_id: str, hermes_home: str, server_name: str, cfg: dict, reconnect_live: bool) -> None:
@@ -254,9 +268,7 @@ def start_flow(
         redirect_uri="",  # set below once the loopback port is known
         reconnect_live=reconnect_live,
     )
-    httpd = _start_loopback_listener(flow)
-    port = httpd.server_address[1]
-    flow.redirect_uri = f"http://127.0.0.1:{port}/callback"
+    httpd, flow.redirect_uri = _start_loopback_listener(flow, cfg)
 
     rec = {
         "session_id": session_id,

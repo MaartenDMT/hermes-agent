@@ -1,0 +1,48 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: hubspot
+description: Official HubSpot remote MCP server, installed fail-closed for read-only setup.
+source: https://developers.hubspot.com/mcp
+
+transport:
+  type: http
+  url: https://mcp.hubspot.com
+
+auth:
+  type: oauth
+  env:
+    - name: HUBSPOT_MCP_CLIENT_ID
+      prompt: "HubSpot app client ID"
+      required: true
+      secret: false
+    - name: HUBSPOT_MCP_CLIENT_SECRET
+      prompt: "HubSpot app client secret"
+      required: true
+      secret: true
+  client_id_env: HUBSPOT_MCP_CLIENT_ID
+  client_secret_env: HUBSPOT_MCP_CLIENT_SECRET
+  redirect_host: localhost
+  redirect_port: 8765
+
+# HubSpot's unauthenticated metadata does not publish canonical read-tool names.
+# Keep the server disabled and expose nothing until the authenticated user has
+# reviewed tools/list and written an exact positive tools.include allowlist.
+default_enabled: false
+tools:
+  default_enabled: []
+  resources: false
+  prompts: false
+
+post_install: |
+  Register a HubSpot app with this exact redirect URI:
+    http://localhost:8765/callback
+
+  Then run `hermes mcp login hubspot` to authenticate. The server remains
+  disabled and exposes no tools after login. Inspect the authenticated tool
+  list, add only verified read operations to `mcp_servers.hubspot.tools.include`,
+  then set `mcp_servers.hubspot.enabled: true` and start a new session.
+
+  Do not replace the positive include list with a write denylist. New or renamed
+  server tools must remain unavailable until explicitly reviewed and included.

@@ -6725,6 +6725,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     #   include takes precedence over exclude
     #   Neither set → register all tools (backward-compatible default)
     tools_filter = config.get("tools") or {}
+    include_configured = "include" in tools_filter
     include_set = _normalize_name_filter(
         tools_filter.get("include"), f"mcp_servers.{name}.tools.include"
     )
@@ -6733,7 +6734,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     )
 
     def _should_register(tool_name: str) -> bool:
-        if include_set:
+        if include_configured:
             return matches_name_filter(tool_name, include_set)
         if exclude_set:
             return not matches_name_filter(tool_name, exclude_set)
@@ -6987,6 +6988,7 @@ def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]
     fingerprint = config_fingerprint(config)
     tool_timeout = config.get("timeout", _DEFAULT_TOOL_TIMEOUT)
     tools_filter = config.get("tools") or {}
+    include_configured = "include" in tools_filter
     include_set = _normalize_name_filter(
         tools_filter.get("include"), f"mcp_servers.{name}.tools.include"
     )
@@ -6995,7 +6997,7 @@ def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]
     )
 
     def _should_register(tool_name: str) -> bool:
-        if include_set:
+        if include_configured:
             return matches_name_filter(tool_name, include_set)
         if exclude_set:
             return not matches_name_filter(tool_name, exclude_set)

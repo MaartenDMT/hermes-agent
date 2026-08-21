@@ -301,8 +301,76 @@ class TestInstall:
         assert "${MCP_DEMO_API_KEY}" in raw
         assert "secret-val" not in raw
 
+    def test_preregistered_oauth_prompts_are_profile_scoped_and_config_is_secret_free(
+        self, catalog_dir, monkeypatch, tmp_path
+    ):
+        body = _basic_manifest(
+            transport={"type": "http", "url": "https://mcp.example.test"},
+            auth={
+                "type": "oauth",
+                "env": [
+                    {"name": "DEMO_CLIENT_ID", "prompt": "client id", "secret": False},
+                    {"name": "DEMO_CLIENT_SECRET", "prompt": "client secret", "secret": True},
+                ],
+                "client_id_env": "DEMO_CLIENT_ID",
+                "client_secret_env": "DEMO_CLIENT_SECRET",
+                "redirect_host": "localhost",
+                "redirect_port": 8765,
+            },
+            default_enabled=False,
+            tools={"default_enabled": [], "resources": False, "prompts": False},
+        )
+        _write_manifest(catalog_dir, "demo", body)
 
+        from hermes_cli import config, mcp_catalog
+        from agent import secret_scope
 
+        profiles = [tmp_path / "profile-a", tmp_path / "profile-b"]
+        prompted = iter(["client-a", "secret-a", "client-b", "secret-b"])
+        monkeypatch.setattr(mcp_catalog, "_prompt_input", lambda *a, **kw: next(prompted))
+
+        prior_multiplex = secret_scope.is_multiplex_active()
+        secret_scope.set_multiplex_active(True)
+        try:
+            for profile in profiles:
+                profile.mkdir()
+                monkeypatch.setattr(
+                    config, "get_config_path", lambda p=profile: p / "config.yaml"
+                )
+                monkeypatch.setattr(
+                    config, "get_env_path", lambda p=profile: p / ".env"
+                )
+                token = secret_scope.set_secret_scope(
+                    secret_scope.build_profile_secret_scope(profile)
+                )
+                try:
+                    mcp_catalog.install_entry(_entry("demo"), enable=True)
+                finally:
+                    secret_scope.reset_secret_scope(token)
+        finally:
+            secret_scope.set_multiplex_active(prior_multiplex)
+
+        for profile, client, secret in zip(
+            profiles, ("client-a", "client-b"), ("secret-a", "secret-b")
+        ):
+            raw_config = (profile / "config.yaml").read_text()
+            raw_env = (profile / ".env").read_text()
+            server = yaml.safe_load(raw_config)["mcp_servers"]["demo"]
+            assert server["enabled"] is False
+            assert server["tools"] == {
+                "include": [], "resources": False, "prompts": False
+            }
+            assert server["oauth"] == {
+                "client_id": "${DEMO_CLIENT_ID}",
+                "client_secret": "${DEMO_CLIENT_SECRET}",
+                "redirect_host": "localhost",
+                "redirect_port": 8765,
+            }
+            assert secret not in raw_config
+            assert f"DEMO_CLIENT_ID={client}" in raw_env
+            assert f"DEMO_CLIENT_SECRET={secret}" in raw_env
+            other_secret = "secret-b" if secret == "secret-a" else "secret-a"
+            assert other_secret not in raw_env
 
 # ---------------------------------------------------------------------------
 # Uninstall

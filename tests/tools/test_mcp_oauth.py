@@ -495,6 +495,26 @@ class TestCallbackPortReservation:
             if reserved is not None:
                 reserved.close()
 
+    def test_cached_tokens_do_not_reserve_the_callback_port(self):
+        import socket as sock
+        from unittest.mock import MagicMock
+
+        import tools.mcp_oauth as mod
+
+        with sock.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            fixed_port = probe.getsockname()[1]
+        storage = MagicMock()
+        storage.has_cached_tokens.return_value = True
+        cfg: dict = {"redirect_port": fixed_port}
+
+        port = mod._configure_callback_port(cfg, storage)
+
+        assert port == fixed_port
+        assert fixed_port not in mod._reserved_sockets
+        with sock.socket() as other_process:
+            other_process.bind(("127.0.0.1", fixed_port))
+
     def test_busy_pinned_port_fails_during_configuration(self):
         import socket as sock
         import tools.mcp_oauth as mod

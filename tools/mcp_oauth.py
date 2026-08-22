@@ -1255,11 +1255,19 @@ def _configure_callback_port(
         return 0
     requested = int(cfg.get("redirect_port", 0))
     # Precedence: explicit config port → cached client-registration port →
-    # fresh ephemeral port. Every local callback port is reserved here and
-    # held until the waiter adopts it, so fixed ports fail before an
-    # authorization URL can be opened and ephemeral ports remain race-free.
+    # fresh ephemeral port. A provider with cached tokens does not need a
+    # callback listener during normal startup. Do not reserve its fixed port:
+    # long-lived gateway processes would otherwise block every CLI/Desktop
+    # process from reusing the same authenticated MCP configuration. If a
+    # later refresh actually needs browser authorization, the callback waiter
+    # binds the fixed port at that point and fails clearly on a real conflict.
     fixed_port = requested or _cached_redirect_port(storage)
-    port = _reserve_callback_port(fixed_port or 0, host)
+    if fixed_port and storage is not None and storage.has_cached_tokens():
+        port = fixed_port
+    else:
+        # Initial authorization keeps the reservation from selection until the
+        # waiter adopts it, closing the TOCTOU window for new registrations.
+        port = _reserve_callback_port(fixed_port or 0, host)
     cfg["_resolved_port"] = port
     _oauth_port = port  # legacy consumer: _wait_for_callback reads this
     return port

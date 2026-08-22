@@ -753,6 +753,9 @@ class TestMcpLogin:
 
     def test_login_genuine_success_with_token(self, tmp_path, capsys, monkeypatch):
         """Probe lists tools AND a token exists → report real success."""
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config.get_hermes_home", lambda: tmp_path
+        )
         _seed_config(tmp_path, {
             "realserver": {"url": "https://mcp.example.com/mcp", "auth": "oauth"},
         })
@@ -783,6 +786,82 @@ class TestMcpLogin:
         # The login path must grant a human enough time to finish the browser
         # OAuth round-trip — far longer than the 30s probe default.
         assert seen["connect_timeout"] >= 180
+
+    def test_login_pins_token_persistence_and_cold_reuse_to_active_profile(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """The CLI-owned profile must also own SDK token writes and checks."""
+        import asyncio
+        import os
+        import subprocess
+        import sys
+
+        from hermes_cli import mcp_config
+        from mcp.shared.auth import OAuthToken
+        from tools.mcp_oauth import HermesTokenStorage
+        from tools.mcp_oauth_manager import reset_manager_for_tests
+
+        active_home = tmp_path / "profiles" / "orchestrator"
+        wrong_home = tmp_path / "profiles" / "other"
+        active_home.mkdir(parents=True)
+        wrong_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(wrong_home))
+        monkeypatch.setattr(mcp_config, "get_hermes_home", lambda: active_home)
+        reset_manager_for_tests()
+
+        server = {
+            "url": "https://mcp.example.test",
+            "auth": "oauth",
+            "enabled": False,
+            "tools": {
+                "include": [],
+                "require_positive_include": True,
+                "resources": False,
+                "prompts": False,
+            },
+        }
+
+        def mock_probe(_name, _cfg, connect_timeout=30):
+            token = OAuthToken(
+                access_token="mock-access",
+                refresh_token="mock-refresh",
+                token_type="Bearer",
+                expires_in=3600,
+            )
+            asyncio.run(HermesTokenStorage("hubspot").set_tokens(token))
+            return [("read_contact", "Read")]
+
+        monkeypatch.setattr(mcp_config, "_probe_single_server", mock_probe)
+
+        assert mcp_config._reauth_oauth_server("hubspot", server) is True
+
+        active_storage = HermesTokenStorage("hubspot", hermes_home=active_home)
+        wrong_storage = HermesTokenStorage("hubspot", hermes_home=wrong_home)
+        assert active_storage.has_cached_tokens()
+        assert not wrong_storage.has_cached_tokens()
+        # A fresh process using the active profile sees the persisted token.
+        child_env = os.environ.copy()
+        child_env["HERMES_HOME"] = str(active_home)
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from tools.mcp_oauth import HermesTokenStorage; "
+                    "raise SystemExit(0 if "
+                    "HermesTokenStorage('hubspot').has_cached_tokens() else 1)"
+                ),
+            ],
+            cwd=str(Path(__file__).resolve().parents[2]),
+            env=child_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert child.returncode == 0, child.stderr
+        assert server["enabled"] is False
+        assert server["tools"]["include"] == []
+        assert "Authenticated" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

@@ -401,7 +401,7 @@ def _probe_single_server(
     return tools_found
 
 
-def _oauth_tokens_present(name: str) -> bool:
+def _oauth_tokens_present(name: str, *, hermes_home=None) -> bool:
     """Return True if an OAuth token file exists on disk for ``name``.
 
     Used after ``hermes mcp login`` to distinguish a genuine authentication
@@ -410,11 +410,12 @@ def _oauth_tokens_present(name: str) -> bool:
     """
     try:
         from tools.mcp_oauth import HermesTokenStorage
-        return HermesTokenStorage(name).has_cached_tokens()
+        return HermesTokenStorage(
+            name, hermes_home=hermes_home
+        ).has_cached_tokens()
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("Could not check OAuth tokens for '%s': %s", name, exc)
-        # Be permissive on unexpected errors: don't block a real success.
-        return True
+        return False
 
 
 def _unwrap_exception_group(exc: BaseException) -> Exception:
@@ -824,11 +825,16 @@ def _reauth_oauth_server(name: str, server_config: dict) -> bool:
         _info("Use `hermes mcp remove` + `hermes mcp add` to reconfigure auth.")
         return False
 
+    # Resolve the owning profile once. The MCP probe runs on another event
+    # loop and token verification runs after it returns; both must use this
+    # exact home even if ambient profile context changes between those steps.
+    hermes_home = get_hermes_home()
+
     # Wipe both disk and in-memory cache so the next probe forces a fresh
     # OAuth flow.
     try:
         from tools.mcp_oauth_manager import get_manager
-        get_manager().remove(name)
+        get_manager().remove(name, hermes_home=hermes_home)
     except Exception as exc:
         _warning(f"Could not clear existing OAuth state: {exc}")
 
@@ -847,6 +853,10 @@ def _reauth_oauth_server(name: str, server_config: dict) -> bool:
     # spawned terminals). Without this, OAuth refuses before opening a
     # browser because _is_interactive() only checks sys.stdin.isatty().
     try:
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
         from tools.mcp_oauth import force_interactive_oauth
 
         _login_connect_timeout = server_config.get("connect_timeout")
@@ -855,10 +865,14 @@ def _reauth_oauth_server(name: str, server_config: dict) -> bool:
         except (TypeError, ValueError):
             _login_connect_timeout = 0.0
         _login_connect_timeout = max(_login_connect_timeout, 315.0)
-        with force_interactive_oauth():
-            tools = _probe_single_server(
-                name, server_config, connect_timeout=_login_connect_timeout
-            )
+        home_token = set_hermes_home_override(hermes_home)
+        try:
+            with force_interactive_oauth():
+                tools = _probe_single_server(
+                    name, server_config, connect_timeout=_login_connect_timeout
+                )
+        finally:
+            reset_hermes_home_override(home_token)
         # A clean probe is NOT proof of authentication. Some MCP servers
         # (notably Google's official Drive server) serve initialize +
         # tools/list WITHOUT auth, so the probe lists tools even when the
@@ -867,7 +881,7 @@ def _reauth_oauth_server(name: str, server_config: dict) -> bool:
         # "Authenticated — N tools" in that case is a false success: every
         # real tool call later hangs until timeout because there's no token.
         # Verify a token actually landed on disk before claiming success.
-        if not _oauth_tokens_present(name):
+        if not _oauth_tokens_present(name, hermes_home=hermes_home):
             _warning(
                 "Server responded, but no OAuth token was obtained — "
                 "authentication did not complete."

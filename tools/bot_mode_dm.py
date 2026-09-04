@@ -392,8 +392,13 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                 return _run_local_turn(argv, dm_file)
             # Keep the file open until the transport exits; cleanup occurs
             # after subprocess.run returns, not merely after stdin reaches EOF.
-            with open(dm_file, "r", encoding="utf-8") as stream:
-                return subprocess.run(argv, stdin=stream, check=False).returncode
+            with open(dm_file, "rb") as stream:
+                child_env = os.environ.copy()
+                # The DM payload is always UTF-8. Native Windows Python otherwise
+                # decodes redirected stdin with the active console code page, which
+                # corrupts non-ASCII bot messages before the peer CLI can read them.
+                child_env["PYTHONIOENCODING"] = "utf-8"
+                return subprocess.run(argv, stdin=stream, check=False, env=child_env).returncode
     finally:
         _unlink_dm_file(dm_file)
 

@@ -689,7 +689,8 @@ def test_sweeper_removes_only_stale_dm_files(tmp_path, monkeypatch):
     assert unrelated.exists()
 
 
-def test_dm_dir_is_private_and_uid_scoped_on_posix(tmp_path, monkeypatch):
+@pytest.mark.linux_only
+def test_dm_dir_is_private_and_uid_scoped_on_linux(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_mode_dm.tempfile, "gettempdir", lambda: str(tmp_path))
 
     dm_dir = bot_mode_dm._dm_dir()
@@ -701,7 +702,8 @@ def test_dm_dir_is_private_and_uid_scoped_on_posix(tmp_path, monkeypatch):
     assert dm_dir.stat().st_mode & 0o777 == 0o700
 
 
-def test_dm_dir_repairs_restrictive_owner_mode(tmp_path, monkeypatch):
+@pytest.mark.linux_only
+def test_dm_dir_repairs_restrictive_owner_mode_on_linux(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_mode_dm.tempfile, "gettempdir", lambda: str(tmp_path))
     uid = os.getuid() if hasattr(os, "getuid") else None
     dirname = f"{bot_mode_dm._DM_DIR_NAME}-{uid}" if uid is not None else bot_mode_dm._DM_DIR_NAME
@@ -713,7 +715,7 @@ def test_dm_dir_repairs_restrictive_owner_mode(tmp_path, monkeypatch):
     assert dm_dir.stat().st_mode & 0o777 == 0o700
 
 
-@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership contract")
+@pytest.mark.linux_only
 def test_dm_dir_rejects_precreated_symlink(tmp_path, monkeypatch):
     target = tmp_path / "attacker-controlled"
     target.mkdir()
@@ -723,3 +725,13 @@ def test_dm_dir_rejects_precreated_symlink(tmp_path, monkeypatch):
 
     with pytest.raises(PermissionError, match="not a directory"):
         bot_mode_dm._dm_dir()
+
+
+@pytest.mark.windows_only
+def test_dm_dir_uses_the_user_temp_root_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_mode_dm.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    dm_dir = bot_mode_dm._dm_dir()
+
+    assert dm_dir == tmp_path / bot_mode_dm._DM_DIR_NAME
+    assert dm_dir.is_dir()

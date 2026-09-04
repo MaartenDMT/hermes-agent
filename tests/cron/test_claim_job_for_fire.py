@@ -9,6 +9,12 @@ E2E-over-mocks discipline for file-touching code.
 """
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+import json
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -130,6 +136,88 @@ def test_fire_claim_heartbeat_refreshes_only_expected_owner(temp_home, monkeypat
         job["id"],
         expected_owner="replacement-owner",
     ) is False
+
+
+@pytest.mark.parametrize("mutation", ["takeover", "completion"])
+@pytest.mark.parametrize("contention", ["delivery_thread", "renewal_process"])
+def test_delivery_fence_allows_heartbeat_but_blocks_owner_mutation(
+    temp_home, monkeypatch, mutation, contention,
+):
+    """Renewal must not contend with delivery; replacing or clearing its owner must."""
+    import cron.jobs as jobs
+
+    job = jobs.create_job(prompt="x", schedule="every 5m", name="delivery-heartbeat")
+    claimed = jobs.claim_job_for_fire(job["id"], return_job=True)
+    owner = claimed["fire_claim"]["by"]
+    monkeypatch.setattr(jobs, "_JOBS_LOCK_TIMEOUT_SECONDS", 0.1)
+
+    def mutate_owner():
+        if mutation == "takeover":
+            return jobs.claim_job_for_fire(job["id"], claim_ttl_seconds=0)
+        return jobs.mark_job_run(job["id"], True, expected_fire_owner=owner)
+
+    if contention == "delivery_thread":
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            with jobs.fire_claim_fence(job["id"], expected_owner=owner) as owns_claim:
+                assert owns_claim is True
+                heartbeat = pool.submit(jobs.heartbeat_fire_claim, job["id"], expected_owner=owner)
+                competing = pool.submit(mutate_owner)
+                assert heartbeat.result(timeout=5) is True
+                assert competing.result(timeout=5) is False
+                assert jobs.get_job(job["id"])["fire_claim"]["by"] == owner
+    else:
+        # The child has a distinct RLock. Force only its global store lock to degrade;
+        # real per-job OS locks must still exclude it from the paused owner's write.
+        child_code = textwrap.dedent("""
+            import json, sys
+            from pathlib import Path
+            from cron import jobs
+            job_id, owner, mutation = sys.argv[1:]
+            acquire = jobs._acquire_flock
+            jobs._JOBS_LOCK_TIMEOUT_SECONDS = 0.1
+            jobs._acquire_flock = lambda fd, timeout: (
+                False if Path(fd.name).name == '.jobs.lock' else acquire(fd, timeout)
+            )
+            if mutation == 'takeover':
+                result = jobs.claim_job_for_fire(job_id, claim_ttl_seconds=0)
+            else:
+                result = jobs.mark_job_run(job_id, True, expected_fire_owner=owner)
+            print(json.dumps(result))
+        """)
+        loaded = threading.Event()
+        release = threading.Event()
+        refresh = jobs._refresh_claim
+
+        def paused_refresh(records, claim, expected_owner):
+            loaded.set()
+            assert release.wait(timeout=30), "competing process did not finish"
+            return refresh(records, claim, expected_owner)
+
+        monkeypatch.setattr(jobs, "_refresh_claim", paused_refresh)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            heartbeat = pool.submit(jobs.heartbeat_fire_claim, job["id"], expected_owner=owner)
+            try:
+                assert loaded.wait(timeout=5), "heartbeat did not load its owner"
+                child = subprocess.run(
+                    [sys.executable, "-c", child_code, job["id"], owner, mutation],
+                    cwd=Path(jobs.__file__).resolve().parent.parent,
+                    capture_output=True, text=True, timeout=25,
+                )
+                assert child.returncode == 0, child.stderr
+                assert json.loads(child.stdout) is False
+            finally:
+                release.set()
+            assert heartbeat.result(timeout=5) is True
+        monkeypatch.setattr(jobs, "_refresh_claim", refresh)
+        assert jobs.get_job(job["id"])["fire_claim"]["by"] == owner
+
+    assert mutate_owner() is True
+    if mutation == "completion":
+        assert jobs.claim_job_for_fire(job["id"]) is True
+    replacement = dict(jobs.get_job(job["id"])["fire_claim"])
+    assert replacement["by"] != owner
+    assert jobs.heartbeat_fire_claim(job["id"], expected_owner=owner) is False
+    assert jobs.get_job(job["id"])["fire_claim"] == replacement
 
 
 def test_reclaimed_fire_uses_new_owner_token(temp_home, monkeypatch):

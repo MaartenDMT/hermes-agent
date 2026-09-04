@@ -289,12 +289,15 @@ def _jobs_lock():
 
 
 @contextlib.contextmanager
-def _fire_job_lock(job_id: str):
+def _fire_job_lock(job_id: str, *, ownership_only: bool = False):
     """Serialize one job's owner mutations and external side effects. Unlike the global jobs lock
     this may be held across network delivery; scoped to one profile + job so unrelated jobs keep
-    progressing. Fails closed when cross-process locking is unavailable."""
+    progressing. The separate ownership lock covers short claim writes, allowing renewal
+    during delivery. Fails closed when cross-process locking is unavailable."""
     cron_dir = _current_cron_store().cron_dir
     lock_key = f"{cron_dir.resolve()}::{job_id}"
+    if ownership_only:
+        lock_key += "::owner"
     with _fire_fence_locks_guard:
         local_lock = _fire_fence_locks.setdefault(lock_key, threading.RLock())
 
@@ -347,7 +350,8 @@ def _under_fire_fence(job_id: str, fn: Callable[[], Any]) -> Any:
     with _fire_job_lock(job_id) as acquired:
         if not acquired:
             return False
-        return fn()
+        with _fire_job_lock(job_id, ownership_only=True) as owns_write:
+            return fn() if owns_write else False
 
 
 @contextlib.contextmanager
@@ -2088,6 +2092,7 @@ def remove_job(job_id: str) -> bool:
         _fence_key = f"{_current_cron_store().cron_dir.resolve()}::{canonical_id}"
         with _fire_fence_locks_guard:
             _fire_fence_locks.pop(_fence_key, None)
+            _fire_fence_locks.pop(_fence_key + "::owner", None)
         return True
 
 
@@ -2517,7 +2522,10 @@ def heartbeat_fire_claim(job_id: str, *, expected_owner: str) -> bool:
     def apply(jobs, _i, job):
         return _refresh_claim(jobs, job.get("fire_claim"), expected_owner)
 
-    return _under_fire_fence(job_id, lambda: _with_job(job_id, apply, False))
+    # Delivery retains the fire fence. Only share its short owner-write lock: the global
+    # jobs lock can degrade across processes, so it cannot protect this owner CAS alone.
+    with _fire_job_lock(job_id, ownership_only=True) as owns_write:
+        return _with_job(job_id, apply, False) if owns_write else False
 
 
 # Completed one-shots are retained in jobs.json (final status stays inspectable) and pruned by

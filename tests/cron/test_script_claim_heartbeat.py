@@ -360,6 +360,47 @@ def test_run_one_job_refreshes_fire_claim_in_profile_store(tmp_path, monkeypatch
     assert refreshed["by"] == original_claim["by"]
 
 
+def test_delivery_spanning_heartbeat_finishes_successfully(tmp_path, monkeypatch):
+    """A long delivery must retain its owner and record a successful terminal result."""
+    import cron.jobs as jobs
+    import cron.scheduler as scheduler
+    from cron.executions import get_execution
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(jobs, "_JOBS_LOCK_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(scheduler, "_RUN_CLAIM_HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(scheduler, "_launch_external_cron_worker", lambda job: False)
+    monkeypatch.setattr(scheduler, "run_job", lambda job, **kwargs: (True, "output", "result", None))
+    delivering = threading.Event()
+    heartbeat_finished = threading.Event()
+    real_heartbeat = jobs.heartbeat_fire_claim
+
+    def heartbeat(job_id, *, expected_owner):
+        result = real_heartbeat(job_id, expected_owner=expected_owner)
+        if delivering.is_set():
+            heartbeat_finished.set()
+        return result
+
+    def deliver(job, content, **kwargs):
+        delivering.set()
+        assert heartbeat_finished.wait(timeout=5), "no heartbeat completed during delivery"
+        return None
+
+    monkeypatch.setattr(scheduler, "heartbeat_fire_claim", heartbeat)
+    monkeypatch.setattr(scheduler, "_deliver_result", deliver)
+    job = jobs.create_job(
+        prompt="x", schedule="every 5m", name="long-delivery", deliver="bot-chat:research",
+    )
+    claimed = jobs.claim_job_for_fire(job["id"], return_job=True)
+    assert scheduler.run_one_job(claimed) is True
+    persisted = jobs.get_job(job["id"])
+    assert persisted["last_status"] == "ok"
+    assert persisted["last_error"] is None
+    assert persisted.get("last_delivery_error") is None
+    assert persisted.get("fire_claim") is None
+    assert get_execution(claimed["execution_id"])["status"] == "completed"
+
+
 def test_lost_fire_claim_stops_stale_delivery(monkeypatch):
     """A runner that loses its durable owner must not deliver its stale result."""
     import cron.scheduler as scheduler
@@ -543,7 +584,7 @@ def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch):
         raise OSError("store unavailable")
 
     def run_body(_job, **kwargs):
-        assert kwargs["fire_claim_lost"].wait(timeout=0.5)
+        assert kwargs["fire_claim_lost"].wait(timeout=5)
         return True
 
     job = {
@@ -554,6 +595,9 @@ def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch):
     monkeypatch.setattr(scheduler, "_run_one_job_body", run_body)
     monkeypatch.setattr(scheduler, "_RUN_CLAIM_HEARTBEAT_SECONDS", 0.01)
     monkeypatch.setattr(scheduler, "_FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS", 0.03)
+    heartbeat_clock = MagicMock(wraps=time)
+    heartbeat_clock.monotonic.side_effect = lambda: calls * 0.01
+    monkeypatch.setattr(scheduler, "time", heartbeat_clock)
 
     assert scheduler.run_one_job(job) is True
     assert calls >= 3

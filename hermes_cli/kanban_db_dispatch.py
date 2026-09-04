@@ -173,15 +173,14 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
         return ("unknown", None)
     raw, _ = entry
     try:
-        if os.WIFEXITED(raw):
-            code = os.WEXITSTATUS(raw)
-            if code == 0:
-                return ("clean_exit", 0)
-            if code == _kb.KANBAN_RATE_LIMIT_EXIT_CODE:
-                return ("rate_limited", code)
-            return ("nonzero_exit", code)
-        if os.WIFSIGNALED(raw):
-            return ("signaled", os.WTERMSIG(raw))
+        code = os.waitstatus_to_exitcode(raw)
+        if code == 0:
+            return ("clean_exit", 0)
+        if code == _kb.KANBAN_RATE_LIMIT_EXIT_CODE:
+            return ("rate_limited", code)
+        if code < 0:
+            return ("signaled", -code)
+        return ("nonzero_exit", code)
     except Exception:
         pass
     return ("unknown", None)

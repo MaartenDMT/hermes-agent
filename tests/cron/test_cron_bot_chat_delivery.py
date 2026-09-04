@@ -143,6 +143,8 @@ def test_deliver_runs_canonical_bot_chat_lane():
     assert "--query-file" in argv
     # Message rides a temp file, never inline argv (quote/expansion safety).
     assert not any("the output" in str(a) for a in argv)
+    assert calls["kwargs"]["encoding"] == "utf-8"
+    assert calls["kwargs"]["errors"] == "replace"
 
 
 def test_deliver_named_profile_uses_p_flag_and_clears_home():

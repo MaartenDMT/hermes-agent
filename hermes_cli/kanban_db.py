@@ -89,6 +89,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
+from hermes_cli.kanban_task_contract import (
+    TaskContractError,
+    decode_task_contract,
+    encode_task_contract,
+    validate_task_contract,
+)
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
 
@@ -1141,6 +1147,11 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    # Optional normalized planning/routing fields owned by this task. Task id,
+    # title, project, state, dependencies, and timestamps remain native Kanban
+    # columns/tables so this contract cannot become a second lifecycle owner.
+    work_contract: Optional[dict] = None
+    updated_at: Optional[int] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1154,6 +1165,16 @@ class Task:
                     skills_value = [str(s) for s in parsed if s]
             except Exception:
                 skills_value = None
+        work_contract: Optional[dict] = None
+        if "contract_json" in keys and row["contract_json"]:
+            try:
+                work_contract = decode_task_contract(row["contract_json"])
+            except TaskContractError:
+                # Existing task reads must remain available even if an
+                # out-of-band writer corrupted the optional contract. A
+                # projection sees None and reports the typed fields as
+                # unsupported instead of trusting malformed data.
+                work_contract = None
         return cls(
             id=row["id"],
             title=row["title"],
@@ -1234,6 +1255,12 @@ class Task:
                 int(row["block_recurrences"])
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
+            ),
+            work_contract=work_contract,
+            updated_at=(
+                int(row["updated_at"])
+                if "updated_at" in keys and row["updated_at"] is not None
+                else int(row["created_at"])
             ),
         )
 
@@ -1422,7 +1449,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- Strict optional MAOS planning/routing contract. Native task identity,
+    -- state, project, dependency edges, and timestamps are deliberately not
+    -- duplicated inside this JSON value.
+    contract_json        TEXT,
+    -- Last native task-row mutation. Existing rows are backfilled from
+    -- created_at by the additive migration; fresh inserts set it explicitly.
+    updated_at           INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2679,6 +2713,47 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
 
+    if "contract_json" not in cols:
+        # NULL marks legacy and ordinary tasks that do not carry the typed
+        # MAOS planning/routing fields. Readers must report those fields as
+        # unsupported; they must never infer them from body text or run data.
+        _add_column_if_missing(conn, "tasks", "contract_json", "contract_json TEXT")
+
+    if "updated_at" not in cols:
+        # Add nullable first for broad SQLite compatibility, then backfill.
+        # Fresh databases get NOT NULL DEFAULT 0 from SCHEMA_SQL, while old
+        # rows receive their native created_at as the only truthful baseline.
+        _add_column_if_missing(conn, "tasks", "updated_at", "updated_at INTEGER")
+    # Real legacy Kanban tables always own created_at. Keep the migration
+    # tolerant of deliberately partial schemas used by concurrency probes:
+    # there is no truthful timestamp to backfill when that native column is
+    # absent, and the helper must still remain idempotent.
+    if "created_at" in cols:
+        conn.execute(
+            "UPDATE tasks SET updated_at = created_at "
+            "WHERE updated_at IS NULL OR updated_at = 0"
+        )
+    # Keep the timestamp native to the task row without touching every update
+    # call site. The monotonic fallback handles multiple updates in one second
+    # and makes the trigger safe even when recursive_triggers is enabled.
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_tasks_updated_at
+        AFTER UPDATE ON tasks
+        FOR EACH ROW
+        WHEN NEW.updated_at <= OLD.updated_at
+        BEGIN
+            UPDATE tasks
+            SET updated_at = CASE
+                WHEN CAST(strftime('%s', 'now') AS INTEGER) > OLD.updated_at
+                    THEN CAST(strftime('%s', 'now') AS INTEGER)
+                ELSE OLD.updated_at + 1
+            END
+            WHERE id = NEW.id;
+        END
+        """
+    )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -3183,6 +3258,7 @@ def create_task(
     board: Optional[str] = None,
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
+    work_contract: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3222,6 +3298,12 @@ def create_task(
     in its own projects.db, a matching canonical project-linked task in this
     board can supply the repo and branch convention. Its literal worktree is
     never reused; the new task still gets its own task-id-keyed path.
+
+    ``work_contract`` carries the optional strict MAOS planning and routing
+    fields that are not already native Kanban columns. It is validated before
+    the idempotency lookup and persisted on the task row, never in run
+    metadata. Task identity, title, state, project, dependencies, and
+    timestamps remain owned by their existing Kanban fields.
     """
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
@@ -3244,6 +3326,10 @@ def create_task(
         branch_name = str(branch_name).strip() or None
     if branch_name and workspace_kind != "worktree":
         raise ValueError("branch_name is only valid for worktree workspaces")
+
+    contract_json: Optional[str] = None
+    if work_contract is not None:
+        contract_json = encode_task_contract(validate_task_contract(work_contract))
 
     # Inherit the board's scoped project when the caller didn't name one, so a
     # project-scoped board anchors every new task to that project's repo
@@ -3393,21 +3479,6 @@ def create_task(
             )
         skills_list = cleaned
 
-    # Idempotency check — return the existing task instead of creating a
-    # duplicate. Done BEFORE entering write_txn to keep the fast path fast
-    # and to avoid holding a write lock during the lookup. Race is
-    # acceptable: two concurrent creators with the same key might both
-    # insert, at which point both rows exist but the next lookup stabilises.
-    if idempotency_key:
-        row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' "
-            "ORDER BY created_at DESC LIMIT 1",
-            (idempotency_key,),
-        ).fetchone()
-        if row:
-            return row["id"]
-
     now = int(time.time())
 
     # Resolve workspace_path from board-level default_workdir when the
@@ -3438,6 +3509,27 @@ def create_task(
             # compose create_task calls under one outer commit so the
             # dispatcher can never observe a partially constructed graph.
             with write_txn(conn, allow_nested=True):
+                # The lookup belongs under the IMMEDIATE transaction. Two
+                # concurrent creators therefore cannot both pass the check
+                # and persist different contracts under one idempotency key.
+                if idempotency_key:
+                    row = conn.execute(
+                        "SELECT id, contract_json FROM tasks "
+                        "WHERE idempotency_key = ? AND status != 'archived' "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (idempotency_key,),
+                    ).fetchone()
+                    if row:
+                        if (
+                            contract_json is not None
+                            and row["contract_json"] != contract_json
+                        ):
+                            raise ValueError(
+                                "idempotency_key already belongs to a task with "
+                                "a different work_contract"
+                            )
+                        return row["id"]
+
                 # Determine task status from parent status, unless the caller
                 # parks it directly in blocked for human-ops review or in
                 # triage for a specifier.
@@ -3497,8 +3589,9 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id,
+                        contract_json, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3524,6 +3617,8 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        contract_json,
+                        now,
                     ),
                 )
                 for pid in parents:
@@ -3552,6 +3647,7 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                         "model_override": model_override,
                         "provider_override": provider_override,
+                        "has_work_contract": contract_json is not None or None,
                     },
                 )
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
@@ -3826,6 +3922,14 @@ def set_reasoning_effort(
 # Links
 # ---------------------------------------------------------------------------
 
+def _touch_task_updated_at(conn: sqlite3.Connection, task_id: str) -> None:
+    """Advance the native task revision for state held outside its row."""
+    conn.execute(
+        "UPDATE tasks SET updated_at = updated_at WHERE id = ?",
+        (task_id,),
+    )
+
+
 def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
@@ -3837,7 +3941,7 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
             raise ValueError(
                 f"linking {parent_id} -> {child_id} would create a cycle"
             )
-        conn.execute(
+        link = conn.execute(
             "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
             (parent_id, child_id),
         )
@@ -3846,10 +3950,18 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
             "SELECT status FROM tasks WHERE id = ?", (parent_id,)
         ).fetchone()["status"]
         if parent_status != "done":
-            conn.execute(
+            status_update = conn.execute(
                 "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
                 (child_id,),
             )
+        else:
+            status_update = None
+        if link.rowcount and (status_update is None or not status_update.rowcount):
+            # Dependency edges belong to task_links, but they are part of the
+            # projected work item. Touch only the native timestamp column so
+            # adding an edge advances updated_at without copying dependency
+            # ids into contract_json.
+            _touch_task_updated_at(conn, child_id)
         _append_event(
             conn, child_id, "linked",
             {"parent": parent_id, "child": child_id},
@@ -3887,6 +3999,7 @@ def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
             (parent_id, child_id),
         )
         if cur.rowcount:
+            _touch_task_updated_at(conn, child_id)
             _append_event(
                 conn, child_id, "unlinked",
                 {"parent": parent_id, "child": child_id},
@@ -7419,8 +7532,8 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by, updated_at) "
+                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -7431,6 +7544,7 @@ def decompose_triage_task(
                     tenant,
                     now,
                     (author or "decomposer"),
+                    now,
                 ),
             )
             _append_event(
@@ -7450,6 +7564,9 @@ def decompose_triage_task(
                     "VALUES (?, ?)",
                     (parent_id, child_id),
                 )
+                # Dependency edges are native task state. Advance the child's
+                # monotonic revision just as link_tasks() does.
+                _touch_task_updated_at(conn, child_id)
                 _append_event(
                     conn, child_id, "linked",
                     {"parent": parent_id, "child": child_id},
@@ -7553,10 +7670,19 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
         ).fetchone()
         if not row or row["status"] != "archived":
             return False
+        affected_children = [
+            linked["child_id"]
+            for linked in conn.execute(
+                "SELECT child_id FROM task_links WHERE parent_id = ?",
+                (task_id,),
+            ).fetchall()
+        ]
         conn.execute(
             "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
             (task_id, task_id),
         )
+        for child_id in affected_children:
+            _touch_task_updated_at(conn, child_id)
         conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
@@ -7576,10 +7702,19 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
     if the task was not found.
     """
     with write_txn(conn):
+        affected_children = [
+            linked["child_id"]
+            for linked in conn.execute(
+                "SELECT child_id FROM task_links WHERE parent_id = ?",
+                (task_id,),
+            ).fetchall()
+        ]
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
             return False
         conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
+        for child_id in affected_children:
+            _touch_task_updated_at(conn, child_id)
         conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))

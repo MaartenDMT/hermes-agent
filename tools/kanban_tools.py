@@ -35,6 +35,7 @@ from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
+from hermes_cli.kanban_task_contract import task_contract_tool_schema
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 
@@ -498,11 +499,13 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "project_id": task.project_id,
         "created_by": task.created_by,
         "created_at": task.created_at,
+        "updated_at": task.updated_at,
         "started_at": task.started_at,
         "completed_at": task.completed_at,
         "current_run_id": task.current_run_id,
         "model_override": task.model_override,
         "provider_override": task.provider_override,
+        "work_contract": task.work_contract,
         "parents": parents,
         "children": children,
         "parent_count": len(parents),
@@ -543,12 +546,14 @@ def _handle_show(args: dict, **kw) -> str:
                     "workspace_kind": t.workspace_kind,
                     "workspace_path": t.workspace_path,
                     "created_by": t.created_by, "created_at": t.created_at,
+                    "updated_at": t.updated_at,
                     "started_at": t.started_at,
                     "completed_at": t.completed_at,
                     "result": t.result,
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
                     "provider_override": t.provider_override,
+                    "work_contract": t.work_contract,
                 }
 
             def _run_dict(r):
@@ -1411,6 +1416,7 @@ def _handle_create(args: dict, **kw) -> str:
     goal_max_turns = args.get("goal_max_turns")
     model_override = args.get("model")
     provider_override = args.get("provider")
+    work_contract = args.get("work_contract")
     if provider_override and not model_override:
         return tool_error("'provider' requires 'model' to be set as well")
     if isinstance(parents, str):
@@ -1461,6 +1467,7 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
+                work_contract=work_contract,
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
@@ -2301,6 +2308,14 @@ KANBAN_CREATE_SCHEMA = {
                     "provider — a model name alone is resolved against "
                     "the profile's provider and will fail if it belongs "
                     "to a different one. Requires 'model'."
+                ),
+            },
+            "work_contract": {
+                **task_contract_tool_schema(),
+                "description": (
+                    "Optional strict MAOS planning and routing contract. "
+                    "Kanban continues to own the task id, title, project, "
+                    "state, dependency links, and timestamps."
                 ),
             },
             "board": _board_schema_prop(),

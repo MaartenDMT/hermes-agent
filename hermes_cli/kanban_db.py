@@ -95,6 +95,12 @@ from hermes_cli.kanban_task_contract import (
     encode_task_contract,
     validate_task_contract,
 )
+from hermes_cli.kanban_run_binding import (
+    RunBindingError,
+    decode_run_binding,
+    encode_run_binding,
+    validate_run_binding,
+)
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
 
@@ -1292,6 +1298,7 @@ class Run:
     summary: Optional[str]
     metadata: Optional[dict]
     error: Optional[str]
+    maos_run_binding: Optional[dict] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Run":
@@ -1299,6 +1306,21 @@ class Run:
             meta = json.loads(row["metadata"]) if row["metadata"] else None
         except Exception:
             meta = None
+        try:
+            raw_binding = (
+                row["maos_run_binding_json"]
+                if "maos_run_binding_json" in row.keys()
+                else None
+            )
+            if isinstance(raw_binding, bytes):
+                raw_binding = raw_binding.decode("utf-8")
+            binding = (
+                decode_run_binding(raw_binding)
+                if raw_binding
+                else None
+            )
+        except (RunBindingError, UnicodeDecodeError):
+            binding = None
         return cls(
             id=int(row["id"]),
             task_id=row["task_id"],
@@ -1316,6 +1338,7 @@ class Run:
             summary=row["summary"],
             metadata=meta,
             error=row["error"],
+            maos_run_binding=binding,
         )
 
 
@@ -1508,7 +1531,9 @@ CREATE TABLE IF NOT EXISTS task_runs (
     --          gave_up | reclaimed | (null while still running)
     summary             TEXT,
     metadata            TEXT,
-    error               TEXT
+    error               TEXT,
+    -- Optional immutable MAOS dispatch facts. NULL preserves legacy runs.
+    maos_run_binding_json TEXT
 );
 
 -- Files attached to a task (PDFs, images, source documents). The blob
@@ -2839,6 +2864,16 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 conn, "kanban_notify_subs", "delivery_metadata", "delivery_metadata TEXT"
             )
 
+    runs_exist = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
+    ).fetchone() is not None
+    if runs_exist:
+        run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")}
+        if "maos_run_binding_json" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "maos_run_binding_json", "maos_run_binding_json TEXT"
+            )
+
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
     # Synthesize a matching task_runs row so subsequent end-run / heartbeat
@@ -2846,9 +2881,6 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     # against any concurrent dispatcher, and the per-row UPDATE uses
     # ``current_run_id IS NULL`` as a CAS guard so a racing claim can't
     # produce an orphaned row if it interleaves with the backfill pass.
-    runs_exist = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
-    ).fetchone() is not None
     if runs_exist:
         with write_txn(conn):
             inflight = conn.execute(
@@ -2910,6 +2942,27 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         )
 
     _rebuild_drifted_tables(conn)
+    _ensure_run_binding_immutability_trigger(conn)
+
+
+def _ensure_run_binding_immutability_trigger(conn: sqlite3.Connection) -> None:
+    """Reject direct replacement or clearing of a persisted run binding."""
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
+    ).fetchone() is None:
+        return
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_task_runs_binding_immutable
+        BEFORE UPDATE OF maos_run_binding_json ON task_runs
+        FOR EACH ROW
+        WHEN OLD.maos_run_binding_json IS NOT NULL
+         AND NEW.maos_run_binding_json IS NOT OLD.maos_run_binding_json
+        BEGIN
+            SELECT RAISE(ABORT, 'maos run binding is immutable');
+        END
+        """
+    )
 
 
 # Legacy DBs defined these tables with a ``TEXT PRIMARY KEY`` id (or, for
@@ -2951,7 +3004,7 @@ _REBUILD_SPECS = {
         " worker_pid INTEGER, max_runtime_seconds INTEGER,"
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"
         " ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT,"
-        " error TEXT)",
+        " error TEXT, maos_run_binding_json TEXT)",
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",
@@ -12164,6 +12217,15 @@ def known_assignees(conn: sqlite3.Connection) -> list[dict]:
 # Runs (attempt history on a task)
 # ---------------------------------------------------------------------------
 
+_RUN_READ_COLUMNS = (
+    "id, task_id, profile, step_key, status, claim_lock, claim_expires, "
+    "worker_pid, max_runtime_seconds, last_heartbeat_at, started_at, ended_at, "
+    "outcome, summary, metadata, error, "
+    "CASE WHEN typeof(maos_run_binding_json) = 'text' "
+    "THEN CAST(maos_run_binding_json AS BLOB) ELSE NULL END "
+    "AS maos_run_binding_json"
+)
+
 def list_runs(
     conn: sqlite3.Connection,
     task_id: str,
@@ -12187,7 +12249,7 @@ def list_runs(
     if state_type is not None:
         if state_type not in ("status", "outcome"):
             raise ValueError("state_type must be 'status' or 'outcome'")
-    q = "SELECT * FROM task_runs WHERE task_id = ?"
+    q = f"SELECT {_RUN_READ_COLUMNS} FROM task_runs WHERE task_id = ?"
     params: list[Any] = [task_id]
     if not include_active:
         q += " AND ended_at IS NOT NULL"
@@ -12201,15 +12263,85 @@ def list_runs(
 
 def get_run(conn: sqlite3.Connection, run_id: int) -> Optional[Run]:
     row = conn.execute(
-        "SELECT * FROM task_runs WHERE id = ?", (int(run_id),),
+        f"SELECT {_RUN_READ_COLUMNS} FROM task_runs WHERE id = ?", (int(run_id),),
     ).fetchone()
     return Run.from_row(row) if row else None
+
+
+class RunBindingConflictError(RunBindingError):
+    """A run already has a different immutable MAOS dispatch binding."""
+
+
+def bind_run_contract(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: int,
+    contract: Any,
+) -> Run:
+    """Bind canonical MAOS dispatch facts to the current running attempt.
+
+    The caller must use a dedicated connection with no open transaction. A
+    successful return therefore follows the standalone IMMEDIATE commit, so a
+    caller may launch only after another connection can observe the binding.
+    """
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise RunBindingError("task_id must be non-empty text")
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+        raise RunBindingError("run_id must be a positive integer")
+    encoded = encode_run_binding(contract)
+    if conn.in_transaction:
+        raise RunBindingError(
+            "bind_run_contract requires a dedicated connection without an open transaction"
+        )
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT r.task_id, r.status, r.ended_at, "
+            "typeof(r.maos_run_binding_json) AS maos_run_binding_type, "
+            "CASE WHEN typeof(r.maos_run_binding_json) = 'text' "
+            "THEN CAST(r.maos_run_binding_json AS BLOB) ELSE NULL END "
+            "AS maos_run_binding_json, "
+            "t.current_run_id, t.status AS task_status "
+            "FROM task_runs r JOIN tasks t ON t.id = r.task_id WHERE r.id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise RunBindingError("run does not exist")
+        if row["task_id"] != task_id:
+            raise RunBindingError("run does not belong to task")
+        if (
+            row["current_run_id"] != run_id
+            or row["task_status"] != "running"
+            or row["status"] != "running"
+            or row["ended_at"] is not None
+        ):
+            raise RunBindingError("run is not the current running attempt")
+        existing = row["maos_run_binding_json"]
+        if row["maos_run_binding_type"] == "null":
+            conn.execute(
+                "UPDATE task_runs SET maos_run_binding_json = ? WHERE id = ?",
+                (encoded, run_id),
+            )
+        elif row["maos_run_binding_type"] != "text":
+            raise RunBindingConflictError("run has a malformed immutable binding")
+        else:
+            try:
+                existing_text = existing.decode("utf-8") if isinstance(existing, bytes) else None
+            except UnicodeDecodeError as exc:
+                raise RunBindingConflictError(
+                    "run has a malformed immutable binding"
+                ) from exc
+            if existing_text != encoded:
+                raise RunBindingConflictError("run already has a different immutable binding")
+    result = get_run(conn, run_id)
+    if result is None:
+        raise RunBindingError("run disappeared after binding")
+    return result
 
 
 def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
     """Return the most recent run regardless of outcome (active or closed)."""
     row = conn.execute(
-        "SELECT * FROM task_runs WHERE task_id = ? "
+        f"SELECT {_RUN_READ_COLUMNS} FROM task_runs WHERE task_id = ? "
         "ORDER BY started_at DESC, id DESC LIMIT 1",
         (task_id,),
     ).fetchone()

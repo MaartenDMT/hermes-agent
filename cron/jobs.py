@@ -3030,13 +3030,26 @@ def _prune_job_output(job_output_dir: Path, keep: int) -> int:
     return deleted
 
 
-def save_job_output(job_id: str, output: str):
-    """Save job output to file."""
+def save_job_output(job_id: str, output: str, *, execution_id: Optional[str] = None):
+    """Save output, optionally binding it to its durable execution without changing the body."""
+    if execution_id is not None and (
+        not isinstance(execution_id, str) or re.fullmatch(r"[0-9a-f]{32}", execution_id) is None
+    ):
+        raise ValueError("execution_id must be 32 lowercase hexadecimal characters")
     ensure_dirs()
     job_output_dir = _job_output_dir(job_id)
     _ensure_cron_dir(job_output_dir)
     _secure_dir(job_output_dir)
-    output_file = job_output_dir / f"{_hermes_now().strftime('%Y-%m-%d_%H-%M-%S')}.md"
+    timestamp = _hermes_now().strftime("%Y-%m-%d_%H-%M-%S" if execution_id is None
+                                       else "%Y-%m-%d_%H-%M-%S_%f")
+    filename = f"{timestamp}.md"
+    if execution_id is not None:
+        filename = f"{timestamp}_{execution_id}.md"
+        metadata = json.dumps(
+            {"schema_version": "hermes.cron-output.v1", "job_id": job_id,
+             "execution_id": execution_id}, sort_keys=True, separators=(",", ":"))
+        output = f"<!-- hermes-cron-output {metadata} -->\n{output}"
+    output_file = job_output_dir / filename
     atomic_write_text(output_file, output, tmp_prefix=".output_")
     _secure_file(output_file)
     # Bound per-job output growth so long-running deploys don't fill the disk (#52383).

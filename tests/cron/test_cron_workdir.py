@@ -48,6 +48,7 @@ class TestNormalizeWorkdir:
     def test_tilde_expands(self, tmp_path, monkeypatch):
         from cron.jobs import _normalize_workdir
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         result = _normalize_workdir("~")
         assert result == str(tmp_path.resolve())
 
@@ -168,7 +169,7 @@ class TestTickWorkdirPartition:
             return True, "output", "response", None
 
         monkeypatch.setattr(sched, "run_job", fake_run_job)
-        monkeypatch.setattr(sched, "save_job_output", lambda _jid, _o: None)
+        monkeypatch.setattr(sched, "save_job_output", lambda _jid, _o, **_kw: None)
         monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
         monkeypatch.setattr(
             sched, "_deliver_result", lambda *_a, **_kw: None

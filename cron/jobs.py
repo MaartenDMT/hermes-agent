@@ -3493,7 +3493,7 @@ def _prune_job_output(job_output_dir: Path, keep: int) -> int:
     """Remove the oldest ``*.md`` run-output files beyond *keep*. Returns count deleted.
 
     Mirrors the quick-snapshot retention in ``hermes_cli.backup._prune_quick_snapshots``:
-    output filenames are timestamp-based (``%Y-%m-%d_%H-%M-%S.md``) so a reverse
+    output filenames start with a timestamp (optionally followed by an execution ID) so a reverse
     lexical sort orders newest-first, and everything past *keep* is the tail to
     drop. A non-positive *keep* disables pruning. Pruning failures are swallowed
     so they can never break output saving.
@@ -3518,14 +3518,37 @@ def _prune_job_output(job_output_dir: Path, keep: int) -> int:
     return deleted
 
 
-def save_job_output(job_id: str, output: str):
-    """Save job output to file."""
+def save_job_output(job_id: str, output: str, *, execution_id: Optional[str] = None):
+    """Save output, optionally binding it to its native execution-ledger row.
+
+    Legacy diagnostic callers omit execution_id and retain their original format.
+    The envelope identifies the scheduler attempt, not claims made by its script.
+    """
+    if execution_id is not None and (
+        not isinstance(execution_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", execution_id) is None
+    ):
+        raise ValueError(f"Invalid cron execution id for output: {execution_id!r}")
     ensure_dirs()
     job_output_dir = _job_output_dir(job_id)
     job_output_dir.mkdir(parents=True, exist_ok=True)
     _secure_dir(job_output_dir)
 
-    timestamp = _hermes_now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp_format = "%Y-%m-%d_%H-%M-%S"
+    if execution_id is not None:
+        timestamp_format += "_%f"
+    timestamp = _hermes_now().strftime(timestamp_format)
+    if execution_id is not None:
+        timestamp += f"_{execution_id}"
+        metadata = json.dumps(
+            {
+                "schema_version": "hermes.cron-output.v1",
+                "job_id": job_output_dir.name,
+                "execution_id": execution_id,
+            },
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        )
+        output = f"<!-- hermes-cron-output {metadata} -->\n{output}"
     output_file = job_output_dir / f"{timestamp}.md"
 
     fd, tmp_path = tempfile.mkstemp(dir=str(job_output_dir), suffix='.tmp', prefix='.output_')

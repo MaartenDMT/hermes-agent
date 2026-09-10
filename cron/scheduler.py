@@ -6359,7 +6359,7 @@ def _run_one_job_body(
             with _side_effect_fence() as owns_output:
                 if not owns_output:
                     raise _FireClaimLostDuringSideEffect
-                output_file = save_job_output(job["id"], output)
+                output_file = save_job_output(job["id"], output, execution_id=execution_id)
             if verbose:
                 logger.info("Output saved to: %s", output_file)
 

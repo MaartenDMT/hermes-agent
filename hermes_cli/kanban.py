@@ -71,6 +71,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "project_id": t.project_id,
         "created_by": t.created_by,
         "created_at": t.created_at,
+        "updated_at": t.updated_at,
         "started_at": t.started_at,
         "completed_at": t.completed_at,
         "result": t.result,
@@ -81,6 +82,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
+        "work_contract": t.work_contract,
     }
 
 

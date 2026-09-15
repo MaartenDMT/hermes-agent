@@ -563,7 +563,7 @@ def test_terminal_owner_cas_failure_marks_ledger_ownership_lost(monkeypatch):
         lambda *_args, **_kwargs: (True, "output", "response", None),
     )
     monkeypatch.setattr(scheduler, "fire_claim_fence", owned_fence, raising=False)
-    monkeypatch.setattr(scheduler, "save_job_output", lambda *_args: "output.md")
+    monkeypatch.setattr(scheduler, "save_job_output", lambda *_args, **_kwargs: "output.md")
     monkeypatch.setattr(scheduler, "_deliver_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(scheduler, "mark_job_run", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(scheduler, "finish_execution", finish)

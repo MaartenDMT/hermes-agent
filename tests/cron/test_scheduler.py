@@ -5,6 +5,7 @@ import itertools
 import json
 import logging
 import os
+import re
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
@@ -1521,7 +1522,10 @@ class TestSilentDelivery:
             save_mock.return_value = "/tmp/out.md"
             from cron.scheduler import tick
             tick(verbose=False)
-        save_mock.assert_called_once_with("monitor-job", "# full output")
+        save_mock.assert_called_once()
+        assert save_mock.call_args.args == ("monitor-job", "# full output")
+        assert set(save_mock.call_args.kwargs) == {"execution_id"}
+        assert re.fullmatch(r"[0-9a-f]{32}", save_mock.call_args.kwargs["execution_id"])
         deliver_mock.assert_not_called()
 
     def test_whitespace_only_response_is_marked_failed_not_delivered(self):

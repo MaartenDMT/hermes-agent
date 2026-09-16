@@ -175,6 +175,87 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_create_task_rejects_unknown_project_before_insert(kanban_home):
+    with kbc.connect() as conn:
+        with pytest.raises(ValueError, match="unknown project id or slug"):
+            kb.create_task(conn, title="bad task", project_id="does-not-exist")
+
+        assert kb.list_tasks(conn) == []
+
+
+def test_create_task_resolves_project_slug_to_canonical_id(kanban_home, tmp_path):
+    from hermes_cli import projects_db as pdb
+
+    repo = tmp_path / "agent-wiki"
+    repo.mkdir()
+    with pdb.connect_closing() as project_conn:
+        project_id = pdb.create_project(
+            project_conn, name="Agent Wiki", slug="agent-wiki", primary_path=str(repo)
+        )
+        project = pdb.get_project(project_conn, project_id)
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="slug task", project_id="agent-wiki")
+        task = kb.get_task(conn, task_id)
+
+    assert project is not None
+    assert task is not None
+    assert task.project_id == project.id
+
+
+def test_create_task_source_fallback_requires_matching_source_task(
+    kanban_home, tmp_path, monkeypatch
+):
+    from hermes_cli import projects_db as pdb
+
+    creator_home = tmp_path / "creator-profile"
+    worker_home = tmp_path / "worker-profile"
+    creator_home.mkdir()
+    worker_home.mkdir()
+    repo = tmp_path / "agent-wiki"
+    repo.mkdir()
+    shared_db = kanban_home / "kanban.db"
+
+    monkeypatch.setenv("HERMES_HOME", str(creator_home))
+    with pdb.connect_closing() as project_conn:
+        project_id = pdb.create_project(
+            project_conn, name="Agent Wiki", slug="agent-wiki", primary_path=str(repo)
+        )
+    with kbc.connect(db_path=shared_db) as conn:
+        source_id = kb.create_task(conn, title="creator task", project_id=project_id)
+        source = kb.get_task(conn, source_id)
+        assert source is not None
+        assert source.project_id == project_id
+
+        monkeypatch.setenv("HERMES_HOME", str(worker_home))
+        child_id = kb.create_task(
+            conn,
+            title="worker task",
+            project_id=project_id,
+            project_source_task_id=source_id,
+        )
+        child = kb.get_task(conn, child_id)
+        assert child is not None
+        assert child.project_id == project_id
+        assert child.workspace_path == str(repo / ".worktrees" / child_id)
+
+        before = len(kb.list_tasks(conn))
+        with pytest.raises(ValueError, match="unknown project id or slug"):
+            kb.create_task(
+                conn,
+                title="missing source",
+                project_id=project_id,
+                project_source_task_id="missing-source",
+            )
+        with pytest.raises(ValueError, match="unknown project id or slug"):
+            kb.create_task(
+                conn,
+                title="mismatched source",
+                project_id="other-project",
+                project_source_task_id=source_id,
+            )
+        assert len(kb.list_tasks(conn)) == before
+
 
 # ---------------------------------------------------------------------------
 # Links + dependency resolution

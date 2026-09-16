@@ -1133,11 +1133,13 @@ def _resolve_project_link(
     from hermes_cli import projects_db as _pdb
 
     project_repo: Optional[str] = None
+    project_obj = None
+    lookup_error: Exception | None = None
     try:
         with _pdb.connect_closing() as _pconn:
             project_obj = _pdb.get_project(_pconn, project_id)
-    except Exception:
-        project_obj = None
+    except Exception as exc:
+        lookup_error = exc
     if project_obj is None and project_source_task_id:
         project_obj, project_repo = _project_from_source_task(
             conn, _pdb, project_id, str(project_source_task_id),
@@ -1145,9 +1147,7 @@ def _resolve_project_link(
         if project_obj is not None and workspace_kind == "scratch":
             workspace_kind = "worktree"
     if project_obj is None:
-        # Unresolvable id/slug: drop the link (never a dangling reference,
-        # never a crash) and create an ordinary scratch task.
-        return None, None, None, workspace_kind
+        raise ValueError(f"unknown project id or slug: {project_id}") from lookup_error
     # Canonicalise (a slug may have been passed) and anchor the worktree
     # under the project's primary repo.
     if workspace_kind == "scratch" and project_obj.primary_path:

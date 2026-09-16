@@ -117,3 +117,71 @@ class TestAllowlistGlobWithQuotedArgs:
         assert not _command_matches_permanent_allowlist(
             "git -c alias.x='!touch /tmp/pwn; printf ok' x"
         )
+
+
+class TestAllowlistRegexEntries:
+    _DISPATCHER_COMMAND = (
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id 123 --project readersbase --mode dry-run"
+    )
+    _DISPATCHER_REGEX = (
+        r"regex:python operations/automatic-worker-dispatch/auto_dispatch\.py "
+        r"--task-id [0-9]+ --project [a-z]+ --mode dry-run"
+    )
+
+    def test_regex_matches_bounded_dispatcher_command(self, monkeypatch):
+        import tools.approval as mod
+        monkeypatch.setattr(mod, "_permanent_approved", {self._DISPATCHER_REGEX})
+
+        assert _command_matches_permanent_allowlist(self._DISPATCHER_COMMAND)
+
+    @pytest.mark.parametrize("command", [
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--project readersbase --mode dry-run",
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id 123 --project readersbase --mode dry-run --verbose",
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id 123 --task-id 456 --project readersbase --mode dry-run",
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--project readersbase --task-id 123 --mode dry-run",
+    ])
+    def test_regex_refuses_wrong_dispatcher_argument_shape(self, monkeypatch, command):
+        import tools.approval as mod
+        monkeypatch.setattr(mod, "_permanent_approved", {self._DISPATCHER_REGEX})
+
+        assert not _command_matches_permanent_allowlist(command)
+
+    @pytest.mark.parametrize("command", [
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id 123 --project readersbase --mode dry-run && id",
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id 123 --project readersbase --mode dry-run || id",
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id 123 --project readersbase --mode dry-run; id",
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id 123 --project readersbase --mode dry-run | id",
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id 123 --project readersbase --mode dry-run > output",
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id $(id) --project readersbase --mode dry-run",
+        "python operations/automatic-worker-dispatch/auto_dispatch.py "
+        "--task-id 123 --project readersbase --mode 'dry-run",
+    ])
+    def test_regex_runs_after_shell_operator_guard(self, monkeypatch, command):
+        import tools.approval as mod
+        monkeypatch.setattr(mod, "_permanent_approved", {r"regex:.*"})
+
+        assert not _command_matches_permanent_allowlist(command)
+
+    @pytest.mark.parametrize("pattern", ["regex:", "regex:(", "regex:["])
+    def test_malformed_or_empty_regex_fails_closed(self, monkeypatch, pattern):
+        import tools.approval as mod
+        monkeypatch.setattr(mod, "_permanent_approved", {pattern})
+
+        assert not _command_matches_permanent_allowlist("git status")
+
+    def test_regex_never_falls_through_to_glob_matching(self, monkeypatch):
+        import tools.approval as mod
+        monkeypatch.setattr(mod, "_permanent_approved", {r"regex:git .*"})
+
+        assert not _command_matches_permanent_allowlist("regex:git .status")

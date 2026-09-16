@@ -198,6 +198,16 @@ def _command_matches_permanent_allowlist(command: str) -> bool:
         patterns = tuple(_a._permanent_set())
     for pattern in patterns:
         pattern = pattern.strip() if isinstance(pattern, str) else ""
+        if pattern.startswith("regex:"):
+            expression = pattern.removeprefix("regex:")
+            if not expression:
+                continue
+            try:
+                if re.fullmatch(expression, command):
+                    return True
+            except re.error:
+                pass
+            continue
         if pattern and (command == pattern or (any(ch in pattern for ch in "*?[")
                                                and fnmatch.fnmatchcase(command, pattern))):
             return True

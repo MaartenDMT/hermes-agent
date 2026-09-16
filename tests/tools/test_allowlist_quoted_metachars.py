@@ -185,3 +185,21 @@ class TestAllowlistRegexEntries:
         monkeypatch.setattr(mod, "_permanent_approved", {r"regex:git .*"})
 
         assert not _command_matches_permanent_allowlist("regex:git .status")
+
+    def test_overflowing_regex_fails_closed(self, monkeypatch):
+        import tools.approval as mod
+        monkeypatch.setattr(mod, "_permanent_approved", {r"regex:a{999999999999999999999}"})
+
+        assert not _command_matches_permanent_allowlist("a")
+
+    def test_recursive_regex_failure_fails_closed_without_glob_fallback(self, monkeypatch):
+        import tools.approval as mod
+        import tools.approval_floors as floors
+        monkeypatch.setattr(mod, "_permanent_approved", {r"regex:git .*"})
+
+        def raise_engine_error(*_args):
+            raise RecursionError("deep regex")
+
+        monkeypatch.setattr(floors.re, "fullmatch", raise_engine_error)
+
+        assert not _command_matches_permanent_allowlist("regex:git .status")

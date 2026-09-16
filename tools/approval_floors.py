@@ -205,7 +205,7 @@ def _command_matches_permanent_allowlist(command: str) -> bool:
             try:
                 if re.fullmatch(expression, command):
                     return True
-            except re.error:
+            except (re.error, OverflowError, RecursionError):
                 pass
             continue
         if pattern and (command == pattern or (any(ch in pattern for ch in "*?[")

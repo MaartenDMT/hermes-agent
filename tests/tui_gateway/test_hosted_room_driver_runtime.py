@@ -20,6 +20,7 @@ from tui_gateway.hosted_room_driver import (
     HostedRoomRuntime,
     room_session_title,
 )
+from hermes_state_runtime import RuntimeStoreError
 from tui_gateway.hosted_room_peer_http import PeerRunsHTTPError
 from tui_gateway.hosted_room_peer_transport import (
     PeerHostedRoomTransport,
@@ -2006,3 +2007,57 @@ def test_stop_is_bounded_and_does_not_interrupt_active_turn(db: Path):
     assert time.monotonic() - started < 2.0
     assert state.get_task(db, identity)["status"] == "running"
     assert not [call for call in rpc.calls if call[0] == "interrupt"]
+
+
+class FirstCreateRefusedRPC(FakeSessionRPC):
+    """A bot's first turn in a room: the session commits, then the create refuses."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refused = False
+
+    def create(self, **kwargs):
+        session = super().create(**kwargs)
+        if not self.refused:
+            self.refused = True
+            raise RuntimeStoreError("runtime_draining")
+        return session
+
+
+class StaysDrainingRPC(FakeSessionRPC):
+    def resolve_exact(self, **kwargs):
+        raise RuntimeStoreError("runtime_draining")
+
+
+def test_first_turn_refused_while_session_starts_is_retried_not_lost(db: Path):
+    now = [100.0]
+    identity = _identity()
+    _admit(db, identity, prompt="Keep this first turn.")
+    rpc = FirstCreateRefusedRPC()
+    runtime = _runtime(db, rpc, clock=lambda: now[0], lease_ttl_seconds=30,
+                       unavailable_retry_min_seconds=1, unavailable_retry_max_seconds=4)
+
+    runtime._run_cycle()
+    assert state.get_task(db, identity)["status"] == "queued"
+
+    now[0] += 1
+    runtime._run_cycle()
+    assert state.get_task(db, identity)["status"] == "settled"
+    assert [method for method, _ in rpc.calls].count("submit") == 1
+
+
+def test_member_that_stays_draining_fails_its_turn_instead_of_wedging_the_room(db: Path):
+    now = [100.0]
+    identity = _identity()
+    _admit(db, identity, prompt="Nobody home.")
+    runtime = _runtime(db, StaysDrainingRPC(), clock=lambda: now[0], lease_ttl_seconds=30,
+                       unavailable_retry_min_seconds=1, unavailable_retry_max_seconds=2)
+
+    for delay in (1, 2):
+        runtime._run_cycle()
+        assert state.get_task(db, identity)["status"] == "queued"
+        now[0] += delay
+    runtime._run_cycle()
+
+    assert state.get_task(db, identity)["status"] == "failed"
+    assert runtime._unavailable_route_retries == {}

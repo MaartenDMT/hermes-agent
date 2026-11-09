@@ -29,7 +29,7 @@ from tools import file_state
 from hermes_platform.host import facts
 from agent.redact import _is_secret_file_arg, redact_sensitive_text
 from tools.file_tools_paths import (
-    _expand_tilde, _path_resolution_warning, _resolve_base_dir, _resolve_entry_for_task,
+    PathConventionError, _expand_tilde, _path_resolution_warning, _resolve_base_dir, _resolve_entry_for_task,
     _resolve_path_for_task)
 from tools.file_tools_write_guards import (
     _READ_DEDUP_STATUS_MESSAGE, _check_approval_required_write, _check_binary_document_write,
@@ -764,6 +764,8 @@ def _resolve_or_none(filepath: str, task_id: str, *, entry: bool = False) -> str
     ``entry``: keep a symlink in the last component (``_resolve_entry_for_task``)."""
     try:
         return str((_resolve_entry_for_task if entry else _resolve_path_for_task)(filepath, task_id))
+    except PathConventionError:
+        raise  # the write would land in the wrong place, so it must not fall back to the raw path
     except Exception:
         return None
 

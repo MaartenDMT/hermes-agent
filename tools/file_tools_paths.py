@@ -9,6 +9,7 @@ edits to the agent process cwd, e.g. the main repo during a worktree session).
 import logging
 import os
 import posixpath
+import re
 import sys
 import time
 from pathlib import Path, PurePosixPath
@@ -27,6 +28,8 @@ _ENV_CLASS_NAME_HINTS = ("local", "ssh", "docker", "modal", "daytona")
 # home, or a plugin sandbox's ``~`` home).
 _SSH_HOME_RETRY_AFTER = 30.0
 _ssh_home_failed_at: dict[str, float] = {}
+_WINDOWS_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+_CONTAINER_MOUNT_PATH = re.compile(r"/mnt/[^/]{2,}(?:/|$)")
 
 
 def _expand_tilde(path: str) -> str:
@@ -304,12 +307,44 @@ def _container_default_cwd(task_id: str = "default") -> str | None:
     return None
 
 
+class PathConventionError(ValueError):
+    """A path written for the other side of a container boundary."""
+
+
+def _mounted_drive_path(filepath: str, task_id: str) -> str | None:
+    """The sandbox path of a host drive path under the task's mount (the rewrite the file operations
+    do), else None. With no live environment yet, its configured host directory and default mount."""
+    try:
+        from tools.terminal_tool import _get_env_config, _resolve_task_host_cwd
+        from tools.terminal_tool_config import translate_mounted_host_path
+        from tools.terminal_tool_lifecycle import get_active_env
+
+        env = get_active_env(task_id)
+        host_root = (getattr(env, "host_cwd", None) if env is not None
+                     else _resolve_task_host_cwd(_get_env_config(), task_id)) or ""
+        mount = getattr(env, "host_cwd_mount", None) or "/workspace"
+    except Exception:
+        logger.debug("mounted host cwd unavailable for task %s", task_id, exc_info=True)
+        return None
+    mapped = translate_mounted_host_path(filepath, host_root, mount)
+    return None if mapped and ".." in mapped.split("/") else mapped  # a climb out of the mount is not under it
+
+
 def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | PurePosixPath:
     """Resolve *filepath* against the task's absolute base directory
     (absolute inputs are returned resolved-but-unanchored)."""
     if _terminal_env_type_for_task(task_id) == "ssh":
         return _resolve_ssh_path(filepath, task_id)
     container_paths = _uses_container_paths(task_id)
+    if container_paths and _WINDOWS_DRIVE_PATH.match(filepath):
+        # A drive path outside the mount would become a literal ``C:\...`` file name in the sandbox.
+        mapped = _mounted_drive_path(filepath, task_id)
+        if mapped is None:
+            raise PathConventionError(f"Windows path on a container backend (path convention mismatch): {filepath}")
+        return _normalize_without_host_deref(mapped)
+    if not container_paths and sys.platform == "win32" and _CONTAINER_MOUNT_PATH.match(filepath):
+        # ``/mnt/<name>`` would land under ``C:\mnt``; ``/mnt/c`` is left alone: one letter names a drive.
+        raise PathConventionError(f"Container path on a Windows host (path convention mismatch): {filepath}")
     return _anchor(_host_text(filepath, container_paths),
                    lambda: _resolve_base_dir(task_id, container_paths=container_paths), container_paths)
 

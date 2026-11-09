@@ -558,6 +558,15 @@ class HostedRoomRuntime:
             "delay": delay, "next_attempt_at": self.clock() + delay}
         return delay
 
+    def _may_requeue_refused(self, task: Mapping[str, Any], exc: Exception) -> bool:
+        """A refusal before submit ran nothing, and ``runtime_draining`` is retryable: a bot's first
+        turn in a room gets it after its session commits. The backoff bounds it, so a member that
+        stays away still fails its own turn instead of wedging the room."""
+        if getattr(exc, "reason", None) != "runtime_draining":
+            return False
+        retry = self._unavailable_route_retries.get((task["identity"].room_id, _member_id(task)))
+        return retry is None or retry["delay"] < self.unavailable_retry_max_seconds
+
     # ------------------------------------------------------------------ leases
     def _ensure_lease(self, binding: HostedRoomBinding) -> state.DriverLease:
         with self._status_lock:
@@ -645,7 +654,8 @@ class HostedRoomRuntime:
             if getattr(exc, "refused_before_submit", False):
                 # File preparation refused work that never started; no retry can change it.
                 self._settle_failure_if_current(attempt, exc)
-            elif submit_attempted and bool(getattr(exc, "not_admitted", False)):
+            elif (bool(getattr(exc, "not_admitted", False)) if submit_attempted
+                  else self._may_requeue_refused(task, exc)):
                 try:
                     state.requeue_not_admitted_task(self.db_path, attempt, clock=self.clock)
                 except (state.StaleLeaseError, state.StaleTaskError) as fence_exc:
@@ -660,6 +670,7 @@ class HostedRoomRuntime:
                 self._mark_ambiguous(binding, attempt)
                 self._record_task_error(attempt, f"observation failed after submit: {exc}")
             else:
+                self._unavailable_route_retries.pop((task["identity"].room_id, _member_id(task)), None)
                 self._settle_failure_if_current(attempt, exc)
         finally:
             with self._status_lock:

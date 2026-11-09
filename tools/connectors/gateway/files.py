@@ -222,7 +222,7 @@ def _readable_file(raw: str, task_id: Optional[str]) -> str:
 def _backend_path(raw: str, task_id: Optional[str]) -> str:
     """``raw`` as an absolute path in the terminal backend's namespace, resolved the way the file
     tools resolve it. Backends whose files live on another machine are refused, as ``MEDIA:`` is."""
-    from tools.file_tools_paths import _resolve_path_for_task, _terminal_env_type_for_task
+    from tools.file_tools_paths import PathConventionError, _resolve_path_for_task, _terminal_env_type_for_task
 
     task = task_id or "default"
     backend = _terminal_env_type_for_task(task)
@@ -231,7 +231,10 @@ def _backend_path(raw: str, task_id: Optional[str]) -> str:
             "FILE_NOT_ALLOWED", f"Files in the {backend} terminal backend are not on this machine, "
             "so they cannot be sent as a connector file input.",
             hint="Use a file on this machine, or switch to the local or Docker terminal backend.")
-    return str(_resolve_path_for_task(raw, task))
+    try:
+        return str(_resolve_path_for_task(raw, task))
+    except PathConventionError as exc:
+        raise FileInputError("FILE_NOT_ALLOWED", str(exc)) from exc
 
 
 def _read_bytes(raw: str, path: str) -> bytes:

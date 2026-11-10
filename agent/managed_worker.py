@@ -449,9 +449,37 @@ def hello():
     return {'pid': me.pid, 'birth': worker_birth(me), 'ancestors': [p.pid for p in me.parents()[:3]]}
 
 
+def private_control_stdin():
+    """Windows: read the owner's control pipe from a private handle and leave NUL as standard input.
+
+    ``subprocess`` hands a child launched without ``stdin=`` a duplicate of ``STD_INPUT_HANDLE``,
+    which here is the control pipe. While ``WorkerControls.read`` holds its synchronous read on it,
+    such a child can block at startup: the version probe's ``git rev-parse HEAD`` (built into every
+    provider's User-Agent during agent construction) never ran, its 3 s kill hit only the git
+    launcher, and the real git kept the capture pipes open, so the turn never started. The same
+    guard as ``tui_gateway.entry._private_rpc_stdin_windows``, kept local because this entry must not
+    import gateway modules before the policy is bound.
+    """
+    if os.name != 'nt':
+        return
+    import ctypes
+    import msvcrt
+    try:
+        private = os.fdopen(os.dup(sys.stdin.fileno()), 'r', encoding='utf-8')  # os.dup: non-inheritable
+        null_fd = os.open(os.devnull, os.O_RDONLY)
+    except (OSError, ValueError, AttributeError):
+        logger.debug('could not give the managed worker a private control stdin', exc_info=True)
+        return
+    os.dup2(null_fd, 0)
+    os.close(null_fd)
+    ctypes.windll.kernel32.SetStdHandle(-10, msvcrt.get_osfhandle(0))  # STD_INPUT_HANDLE
+    sys.stdin = private
+
+
 def main():
     channel = WorkerChannel(os.fdopen(os.dup(sys.stdout.fileno()), 'wb', buffering=0))  # windows-footgun: ok — binary frames
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    private_control_stdin()
     # This process's own stderr only, never the channel. The owner drains it into the profile's
     # private managed-worker.log, redacting each line (patterns plus this worker's launch key and
     # assignment secret) before it reaches disk; this process never opens a profile log itself.

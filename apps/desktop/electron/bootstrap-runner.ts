@@ -33,9 +33,11 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import https from 'node:https'
 import path from 'node:path'
+import { pipeline } from 'node:stream/promises'
 
 // Relative, not `@hermes/shared/ansi`: the electron bundle is built by esbuild
 // with no tsconfig path resolution (see scripts/bundle-electron-main.mjs).
@@ -224,6 +226,13 @@ function cachedScriptPath(hermesHome, cacheKey) {
   return path.join(bootstrapCacheDir(hermesHome), `install-${cacheKey}.${process.platform === 'win32' ? 'ps1' : 'sh'}`)
 }
 
+// Each download gets its own temp file, opened only once GitHub answers 200, and
+// a stalled request times out. A shared temp path let a stalled or overlapping
+// fetch keep a writable handle that the next fetch's rename moved onto the cached
+// script; Windows then refused `powershell -File` on it ("The process cannot
+// access the file") on every retry until the app restarted.
+const INSTALL_SCRIPT_TIMEOUT_MS = 60_000
+
 function downloadInstallScript(ref, destPath) {
   // Fetch from GitHub raw at the install ref: the packaged SHA for a fresh
   // install, the branch for an existing checkout or a non-git fallback stamp
@@ -231,83 +240,49 @@ function downloadInstallScript(ref, destPath) {
   const scriptName = installScriptName()
   const url = `https://raw.githubusercontent.com/NousResearch/hermes-agent/${ref}/scripts/${scriptName}`
 
-  return new Promise((resolve, reject) => {
-    fs.mkdirSync(path.dirname(destPath), { recursive: true })
-    const tmpPath = destPath + '.tmp'
-    const out = fs.createWriteStream(tmpPath)
-    https
-      .get(url, res => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          // GitHub raw shouldn't redirect for a SHA URL, but follow once
-          // defensively.
-          out.close()
-          fs.unlinkSync(tmpPath)
-          https
-            .get(res.headers.location, res2 => {
-              if (res2.statusCode !== 200) {
-                reject(
-                  new Error(
-                    `Failed to download ${scriptName}: HTTP ${res2.statusCode} from redirect ${res.headers.location}`
-                  )
-                )
+  fs.mkdirSync(path.dirname(destPath), { recursive: true })
+  const tmpPath = `${destPath}.${process.pid}-${randomUUID()}.tmp`
 
-                return
-              }
-
-              const out2 = fs.createWriteStream(tmpPath)
-              res2.pipe(out2)
-              out2.on('finish', () => {
-                out2.close()
-                fs.renameSync(tmpPath, destPath)
-                resolve(destPath)
-              })
-              out2.on('error', reject)
-            })
-            .on('error', reject)
+  const fetchTo = (target: string, redirectsLeft: number) =>
+    new Promise<void>((resolve, reject) => {
+      const req = https.get(target, res => {
+        // GitHub raw shouldn't redirect for a SHA URL, but follow once defensively.
+        if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location && redirectsLeft > 0) {
+          res.resume()
+          fetchTo(res.headers.location, redirectsLeft - 1).then(resolve, reject)
 
           return
         }
 
         if (res.statusCode !== 200) {
-          out.close()
-
-          try {
-            fs.unlinkSync(tmpPath)
-          } catch {
-            void 0
-          }
-
-          reject(new Error(`Failed to download ${scriptName}: HTTP ${res.statusCode} from ${url}`))
+          res.resume()
+          reject(new Error(`Failed to download ${scriptName}: HTTP ${res.statusCode} from ${target}`))
 
           return
         }
 
-        res.pipe(out)
-        out.on('finish', () => {
-          out.close()
-          fs.renameSync(tmpPath, destPath)
-          resolve(destPath)
-        })
-        out.on('error', err => {
-          try {
-            fs.unlinkSync(tmpPath)
-          } catch {
-            void 0
-          }
-
-          reject(err)
-        })
+        // pipeline settles only after the file handle is closed, so the rename
+        // below never races an open writer.
+        pipeline(res, fs.createWriteStream(tmpPath)).then(resolve, reject)
       })
-      .on('error', err => {
-        try {
-          fs.unlinkSync(tmpPath)
-        } catch {
-          void 0
-        }
 
-        reject(err)
-      })
-  })
+      req.setTimeout(INSTALL_SCRIPT_TIMEOUT_MS, () =>
+        req.destroy(new Error(`Timed out downloading ${scriptName} from ${target}`))
+      )
+      req.on('error', reject)
+    })
+
+  return fetchTo(url, 1)
+    .then(() => {
+      fs.renameSync(tmpPath, destPath)
+
+      return destPath
+    })
+    .catch(err => {
+      fs.rmSync(tmpPath, { force: true })
+
+      throw err
+    })
 }
 
 async function resolveInstallScript({

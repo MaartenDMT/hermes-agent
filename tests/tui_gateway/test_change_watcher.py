@@ -499,7 +499,7 @@ def test_skill_installed_from_another_terminal_broadcasts_skills_changed(watcher
     skill.mkdir()
     (skill / "SKILL.md").write_text("---\nname: new-skill\ndescription: d\n---\nbody\n")
     os.utime(skills, (time.time() + 5, time.time() + 5))
-    server._broadcast_watched_changes(now=10.0)
+    server._broadcast_watched_changes(now=40.0)
 
     assert ("skills.changed", {}) in events
 
@@ -536,7 +536,7 @@ def test_a_skill_installed_in_another_sessions_repo_broadcasts_skills_changed(wa
     skill = repo_b / ".hermes" / "skills" / "workspace-only"
     skill.mkdir()
     (skill / "SKILL.md").write_text("---\nname: workspace-only\ndescription: d\n---\nbody\n")
-    server._broadcast_watched_changes(now=10.0)
+    server._broadcast_watched_changes(now=40.0)
     assert ("skills.changed", {}) in events
     token = set_session_cwd(str(repo_b))
     try:

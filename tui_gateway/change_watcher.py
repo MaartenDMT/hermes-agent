@@ -473,7 +473,7 @@ _CHANGE_WATCHES: dict[str, tuple[float, Any, Any] | tuple[float, Any, Any, Any]]
     "platforms.changed": (2.0, lambda: _home_mtime_ns("gateway_state.json"), dict),
     "projects.changed": (2.0, _projects_sig, dict),
     "pairing.changed": (2.0, _pairing_sig, dict),
-    "skills.changed": (2.0, _skills_sig, dict),
+    "skills.changed": (30.0, _skills_sig, dict),  # deep walk of every skill root per scope: keep it slow
     # 1s so a queued DM envelope reaches the Desktop's push-triggered drain fast.
     "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, dict),
     # An open room view re-reads its log delta + status on this; its slow poll is only the backstop.

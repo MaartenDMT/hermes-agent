@@ -878,7 +878,7 @@ class GatewayStartupMixin:
             return await ensure_hosted_service(self)
         return await asyncio.to_thread(self._start_hosted_room_worker_sync)
 
-    async def _hosted_room_worker_watcher(self, interval: float = 1.0) -> None:
+    async def _hosted_room_worker_watcher(self, interval: float = 10.0) -> None:
         """Keep the room worker alive for the messaging gateway lifetime."""
         while self._running:
             await self._ensure_hosted_room_worker()

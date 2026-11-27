@@ -222,3 +222,104 @@ def test_pipe_gone_after_kill_falls_back(live_server, monkeypatch):
     assert fleet[0]["pid"] == os.getpid()
     assert fleet[0]["code_sha"] is None
     assert fleet[0]["state"] == "unknown"
+
+
+def test_slow_pipe_timeout_cancels_cleanly_without_thread_leak_or_warning_spam(
+    tmp_path: Path, caplog
+):
+    """A slow overlapped named-pipe peer cancels inside query_runtime_control before
+    run_bounded_sync abandons the worker, leaves zero deadline-control-pipe threads behind,
+    and logs only timeout/recovery state transitions."""
+    import logging
+
+    from gateway.control_socket import query_gateway_control
+    from gateway.runtime_bootstrap_windows import NativeControlServer
+    from tests.waiting import wait_until
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    release = threading.Event()
+    state = {"slow": True}
+
+    def handler(raw: bytes, _subject=None) -> bytes:
+        if state["slow"]:
+            release.wait(10.0)
+        return json.dumps({"ok": True, "protocol": 1, "result": {"pid": os.getpid()}}).encode() + b"\n"
+
+    server = NativeControlServer(home, handler)
+    server.start()
+    try:
+        with caplog.at_level(logging.INFO):
+            for _ in range(3):
+                assert query_gateway_control(home, "identify", timeout=0.2) is None
+                wait_until(
+                    lambda: not [t for t in threading.enumerate() if t.name == "deadline-control-pipe"],
+                    timeout=2.0,
+                    what="deadline-control-pipe worker exit",
+                )
+
+            state["slow"] = False
+            recovered = query_gateway_control(home, "identify", timeout=2.0)
+            assert recovered == {"pid": os.getpid()}
+
+            state["slow"] = True
+            assert query_gateway_control(home, "identify", timeout=0.2) is None
+    finally:
+        release.set()
+        server.close()
+
+    deadline_warnings = [r for r in caplog.records if r.name == "agent.deadline" and r.levelno >= logging.WARNING]
+    assert deadline_warnings == []
+    pipe_warnings = [
+        r for r in caplog.records
+        if r.name == "gateway.control_socket" and r.levelno == logging.WARNING
+    ]
+    pipe_recoveries = [
+        r for r in caplog.records
+        if r.name == "gateway.control_socket" and r.levelno == logging.INFO and "recovered" in r.getMessage()
+    ]
+    assert len(pipe_warnings) == 2
+    assert all("worker abandoned" not in r.getMessage() for r in pipe_warnings)
+    assert len(pipe_recoveries) == 1
+
+
+def test_windows_pipe_wedged_sync_call_transitions_and_preserves_errors(
+    tmp_path: Path, monkeypatch, caplog
+):
+    """A genuinely wedged sync call past the outer grace still bounds return, logs one
+    abandoned-worker warning per state transition, and never hides unexpected exceptions."""
+    import logging
+
+    import gateway.control_socket as cs
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    release = threading.Event()
+    request = b'{"verb":"identify","id":1,"protocol":1}\n'
+
+    def wedged(_home, _request, _timeout):
+        release.wait(10.0)
+        return b'{"ok": true}\n'
+
+    monkeypatch.setattr(cs, "_windows_pipe_exchange", wedged)
+    try:
+        with caplog.at_level(logging.INFO):
+            assert cs._query_windows_pipe(home, request, 0.05) is None
+            assert cs._query_windows_pipe(home, request, 0.05) is None
+    finally:
+        release.set()
+
+    pipe_warnings = [
+        r for r in caplog.records
+        if r.name == "gateway.control_socket" and r.levelno == logging.WARNING
+    ]
+    assert len(pipe_warnings) == 1
+    assert "worker abandoned" in pipe_warnings[0].getMessage()
+
+    monkeypatch.setattr(
+        cs,
+        "_windows_pipe_exchange",
+        lambda _home, _request, _timeout: (_ for _ in ()).throw(PermissionError("refused")),
+    )
+    with pytest.raises(PermissionError, match="refused"):
+        cs._query_windows_pipe(home, request, 0.2)

@@ -312,6 +312,19 @@ class TestRunBoundedSync:
         assert result.timed_out is False
         assert result.value == "from-caller"
 
+    def test_log_timeout_false_suppresses_deadline_warning(self, caplog):
+        release = threading.Event()
+        with caplog.at_level("WARNING", logger="agent.deadline"):
+            result = run_bounded_sync(
+                lambda: release.wait(30),
+                0.1,
+                label="quiet-op",
+                log_timeout=False,
+            )
+        release.set()
+        assert result.timed_out is True
+        assert not [r for r in caplog.records if "quiet-op" in r.getMessage()]
+
 
 # ---------------------------------------------------------------------------
 # run_bounded_async

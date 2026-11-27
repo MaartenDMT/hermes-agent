@@ -333,6 +333,7 @@ def run_bounded_sync(
     label: str = "operation",
     on_timeout: Optional[Callable[[], None]] = None,
     backend: object | None = None,
+    log_timeout: bool = True,
 ) -> BoundedResult:
     """Run ``fn`` in a daemon worker thread under a wall-clock deadline; exceptions re-raise in
     the caller. On expiry the worker is **abandoned** (every timeout leaks one daemon thread, so
@@ -367,7 +368,8 @@ def run_bounded_sync(
         done.wait(min(_BOUNDED_SYNC_WAIT_SLICE_S, remaining))
 
     if not done.is_set():
-        logger.warning("[deadline] %r timed out after %.1fs; worker abandoned", label, timeout_s)
+        if log_timeout:
+            logger.warning("[deadline] %r timed out after %.1fs; worker abandoned", label, timeout_s)
         # Mark suspect BEFORE owner cleanup so a recycle in on_timeout never
         # inherits a stale flag on the healed replacement.
         _mark_backend_suspect(backend, label, timeout_s)

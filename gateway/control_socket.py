@@ -21,6 +21,7 @@ import socket
 import stat
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -498,14 +499,64 @@ def _query_unix_socket(home: Path, request: bytes, timeout: float) -> Optional[b
     return None
 
 
+# Grace above the inner overlapped-I/O deadline so query_runtime_control cancels its IRP,
+# closes the pipe handle, and exits cleanly before run_bounded_sync abandons the worker.
+_WINDOWS_PIPE_ABANDON_GRACE_S = 0.25
+_WINDOWS_PIPE_TIMEOUT_LOCK = threading.Lock()
+_WINDOWS_PIPE_TIMEOUT_STATE: dict[str, str] = {}
+
+
+def _windows_pipe_outer_timeout(timeout: float) -> float:
+    grace = min(_WINDOWS_PIPE_ABANDON_GRACE_S, max(0.05, timeout * 0.25))
+    return max(0.0, timeout) + grace
+
+
+def _record_windows_pipe_timeout(pipe_name: str, timeout: float, *, abandoned: bool) -> None:
+    mode = "abandoned" if abandoned else "timeout"
+    with _WINDOWS_PIPE_TIMEOUT_LOCK:
+        prev = _WINDOWS_PIPE_TIMEOUT_STATE.get(pipe_name)
+        _WINDOWS_PIPE_TIMEOUT_STATE[pipe_name] = mode
+    # Warn on healthy->timed-out and timeout->abandoned transitions; repeat identical states at DEBUG.
+    warn = prev is None or (abandoned and prev != "abandoned")
+    detail = "worker abandoned" if abandoned else "overlapped I/O cancelled cleanly"
+    log = logger.warning if warn else logger.debug
+    log("Windows control pipe %s timed out after %.1fs (%s)", pipe_name, timeout, detail)
+
+
+def _clear_windows_pipe_timeout(pipe_name: str, *, recovered: bool) -> None:
+    with _WINDOWS_PIPE_TIMEOUT_LOCK:
+        prev = _WINDOWS_PIPE_TIMEOUT_STATE.pop(pipe_name, None)
+    if prev is not None and recovered:
+        logger.info("Windows control pipe %s recovered", pipe_name)
+
+
 def _query_windows_pipe(home: Path, request: bytes, timeout: float) -> Optional[bytes]:
     """The native overlapped client checks its deadline per I/O step, but SID verification and the
-    connect/peer handshake are still synchronous calls into the pipe. Run the exchange on an
-    abandoned-at-deadline worker so a peer that never answers costs ``timeout``, never forever —
-    the bound ``_query_unix_socket`` already gets from ``sock.settimeout`` (#132547)."""
+    connect/peer handshake are still synchronous calls into the pipe. Give ``run_bounded_sync`` a
+    small grace window beyond ``timeout`` so normal overlapped-I/O timeouts cancel and exit the
+    worker cleanly instead of racing the outer deadline, while a wedged synchronous Win32 call
+    still returns bounded (#132547)."""
     from agent.deadline import run_bounded_sync
-    outcome = run_bounded_sync(lambda: _windows_pipe_exchange(home, request, timeout), timeout, label="control-pipe")
-    return None if outcome.timed_out else outcome.value
+
+    pipe_name = windows_pipe_name(home)
+    try:
+        outcome = run_bounded_sync(
+            lambda: _windows_pipe_exchange(home, request, timeout),
+            _windows_pipe_outer_timeout(timeout),
+            label="control-pipe",
+            log_timeout=False,
+        )
+    except TimeoutError:
+        _record_windows_pipe_timeout(pipe_name, timeout, abandoned=False)
+        return None
+    except FileNotFoundError:
+        _clear_windows_pipe_timeout(pipe_name, recovered=False)
+        raise
+    if outcome.timed_out:
+        _record_windows_pipe_timeout(pipe_name, timeout, abandoned=True)
+        return None
+    _clear_windows_pipe_timeout(pipe_name, recovered=True)
+    return outcome.value
 
 
 def _windows_pipe_exchange(home: Path, request: bytes, timeout: float) -> Optional[bytes]:  # pragma: no cover - wine2e lane
